@@ -8,13 +8,14 @@ Real-time financial news sentiment analytics and stock movement prediction pipel
 
 This project ingests financial news articles via [Finnhub](https://finnhub.io), enriches them with FinBERT sentiment scores, and lays the groundwork for downstream stock movement prediction.
 
-| Phase   | Status      | Description                                                |
-| ------- | ----------- | ---------------------------------------------------------- |
-| Phase 1 | ✅ Complete | Finnhub news ingestion → `data/raw/`                       |
-| Phase 2 | ✅ Complete | FinBERT sentiment analysis → `data/processed/`             |
-| Phase 3 | ✅ Complete | PostgreSQL storage → `news_articles` + `sentiment_results` |
-| Phase 4 | ✅ Complete | Feature engineering → `data/features/`                     |
-| Phase 5 | 🔜 Planned  | XGBoost stock movement prediction                          |
+| Phase   | Status      | Description                                                         |
+| ------- | ----------- | ------------------------------------------------------------------- |
+| Phase 1 | ✅ Complete | Finnhub news ingestion → `data/raw/`                                |
+| Phase 2 | ✅ Complete | FinBERT sentiment analysis → `data/processed/`                      |
+| Phase 3 | ✅ Complete | PostgreSQL storage → `news_articles` + `sentiment_results`          |
+| Phase 4 | ✅ Complete | Feature engineering → `data/features/`                              |
+| Phase 5 | ✅ Complete | Stock price ingestion (Yahoo Finance / yfinance) → `stock_prices`   |
+| Phase 6 | 🔜 Planned  | ML training — XGBoost stock movement prediction                     |
 
 ---
 
@@ -26,7 +27,8 @@ financial-news-analytics/
 │   ├── fetch_news.py          # Phase 1: fetch news from Finnhub
 │   ├── run_sentiment.py       # Phase 2: run FinBERT sentiment analysis
 │   ├── load_to_db.py          # Phase 3: load processed CSVs into PostgreSQL
-│   └── generate_features.py   # Phase 4: generate ML feature dataset
+│   ├── generate_features.py   # Phase 4: generate ML feature dataset
+│   └── fetch_prices.py        # Phase 5: ingest stock prices from Yahoo Finance
 │
 ├── src/
 │   ├── ingestion/
@@ -35,10 +37,13 @@ financial-news-analytics/
 │   │   └── sentiment_analyzer.py  # FinBERT sentiment pipeline
 │   ├── storage/
 │   │   ├── database.py        # Engine, session factory, DDL
-│   │   ├── models.py          # SQLAlchemy ORM models
+│   │   ├── models.py          # SQLAlchemy ORM models (incl. StockPrice)
 │   │   └── repository.py      # Upsert, bulk insert, queries
 │   ├── features/
 │   │   └── feature_engineer.py    # Phase 4: feature computation
+│   ├── prices/
+│   │   ├── price_client.py    # Phase 5: Yahoo Finance / yfinance client
+│   │   └── price_repository.py    # Phase 5: stock_prices DB access layer
 │   └── utils/
 │       ├── config.py          # Pydantic settings (env-based)
 │       ├── logger.py          # Structured logging
@@ -50,7 +55,9 @@ financial-news-analytics/
 │       ├── test_news_client.py
 │       ├── test_sentiment_analyzer.py
 │       ├── test_repository.py         # Phase 3: SQLite in-memory tests
-│       └── test_feature_engineer.py   # Phase 4: 80 unit tests
+│       ├── test_feature_engineer.py   # Phase 4: 80 unit tests
+│       ├── test_price_client.py       # Phase 5: 62 unit tests (yfinance mocked)
+│       └── test_price_repository.py   # Phase 5: 60 unit tests (SQLite in-memory)
 │
 ├── data/
 │   ├── raw/                   # Phase 1 output (gitignored)
@@ -158,6 +165,40 @@ Options:
 | `--dry-run`           | —                 | Print config and exit               |
 
 Output: `data/features/feature_dataset_<YYYY-MM-DD>.csv`
+
+### 7. Run Phase 5 — Stock price ingestion
+
+```bash
+# Create the stock_prices table (safe on existing DBs — uses IF NOT EXISTS)
+python scripts/fetch_prices.py --create-tables
+
+# Fetch one year of history for all tickers defined in .env
+python scripts/fetch_prices.py --lookback-days 365
+
+# Specific tickers with a fixed date range
+python scripts/fetch_prices.py --tickers AAPL TSLA NVDA \
+    --start-date 2025-01-01 --end-date 2026-01-01
+
+# Dry-run: fetch from Yahoo Finance but skip all database writes
+python scripts/fetch_prices.py --tickers AAPL --lookback-days 30 --dry-run
+
+# One-shot: create tables then populate
+python scripts/fetch_prices.py --create-tables --lookback-days 365
+```
+
+Options:
+
+| Flag                        | Default             | Description                                      |
+| --------------------------- | ------------------- | ------------------------------------------------ |
+| `--tickers AAPL TSLA`       | from `.env`         | Ticker symbols to fetch                          |
+| `--start-date 2025-01-01`   | today − lookback    | Inclusive start date                             |
+| `--end-date 2026-01-01`     | today               | End date (exclusive per yfinance convention)     |
+| `--lookback-days 365`       | `365`               | Days of history when `--start-date` is omitted  |
+| `--create-tables`           | —                   | Run `CREATE TABLE IF NOT EXISTS` before fetching |
+| `--dry-run`                 | —                   | Fetch data but skip all DB writes                |
+| `--log-level INFO`          | from `.env`         | Verbosity                                        |
+
+Output: rows upserted into the `stock_prices` table.
 
 ---
 
@@ -315,6 +356,57 @@ sentiment_results
 ```
 
 Re-running `load_to_db.py` is always safe — both tables use `ON CONFLICT DO UPDATE` (PostgreSQL) or SELECT-then-UPDATE (SQLite/tests), so existing rows are refreshed rather than duplicated.
+
+### Phase 5 — Stock prices (`stock_prices`)
+
+```
+stock_prices
+├── id              BIGINT PK (auto-increment)
+├── ticker          VARCHAR(10)
+├── trading_date    DATE          ← UNIQUE with ticker (dedup key)
+├── open_price      FLOAT (nullable)
+├── high_price      FLOAT (nullable)
+├── low_price       FLOAT (nullable)
+├── close_price     FLOAT (nullable)
+├── adjusted_close  FLOAT (nullable — falls back to close_price if absent)
+├── volume          BIGINT (nullable)
+└── created_at      TIMESTAMPTZ (server default)
+
+Indexes:
+  ix_stock_prices_ticker       on ticker
+  ix_stock_prices_ticker_date  on (ticker, trading_date)
+```
+
+Source: Yahoo Finance via `yfinance` with `auto_adjust=False`.  
+Re-running `fetch_prices.py` is always safe — `ON CONFLICT DO UPDATE` refreshes OHLCV values in place.
+
+---
+
+## Full Pipeline Diagram
+
+```
+Finnhub API                    Yahoo Finance (yfinance)
+     │                                  │
+     │  Phase 1: fetch_news.py          │  Phase 5: fetch_prices.py
+     ▼                                  ▼
+data/raw/<TICKER>_news_<date>.csv    stock_prices  (PostgreSQL)
+     │
+     │  Phase 2: run_sentiment.py
+     ▼
+data/processed/<TICKER>_sentiment_<date>.csv
+     │
+     │  Phase 3: load_to_db.py
+     ▼
+news_articles + sentiment_results  (PostgreSQL)
+     │
+     │  Phase 4: generate_features.py
+     ▼
+data/features/feature_dataset_<date>.csv
+     │
+     │  Phase 6 (planned): ML training
+     ▼
+  XGBoost model
+```
 
 ---
 

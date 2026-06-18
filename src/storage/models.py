@@ -5,6 +5,7 @@ Tables
 ------
 - ``news_articles``     — raw article metadata fetched from Finnhub (Phase 1)
 - ``sentiment_results`` — FinBERT sentiment scores linked to articles (Phase 2)
+- ``stock_prices``      — daily OHLCV market data from Yahoo Finance (Phase 5)
 
 Schema design
 -------------
@@ -17,17 +18,21 @@ Schema design
   Running Phase 2 with a different model produces a separate row per article;
   re-running with the same model updates the existing row in-place.
 
-- Both tables carry a ``created_at`` server-side default so inserts never
+- ``stock_prices`` is deduplicated on ``(ticker, trading_date)``.
+  Re-running Phase 5 safely refreshes OHLCV values for any existing date.
+
+- All tables carry a ``created_at`` server-side default so inserts never
   need to supply a timestamp explicitly.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import List, Optional
 
 from sqlalchemy import (
     BigInteger,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -145,4 +150,56 @@ class SentimentResult(Base):
         return (
             f"<SentimentResult id={self.id} article_id={self.article_id} "
             f"label={self.sentiment_label!r} score={self.sentiment_score}>"
+        )
+
+
+# ── stock_prices ──────────────────────────────────────────────────────────────
+
+class StockPrice(Base):
+    """
+    One row per (ticker, trading_date) for daily OHLCV market data.
+
+    Source: Yahoo Finance via yfinance (Phase 5).
+
+    Price fields are nullable to accommodate thinly-traded days where
+    Yahoo Finance may report partial data. ``adjusted_close`` falls back
+    to ``close_price`` when yfinance does not return a separate Adj Close
+    column (e.g. when ``auto_adjust=True`` is set by the caller).
+    """
+
+    __tablename__ = "stock_prices"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    ticker:         Mapped[str]            = mapped_column(String(10), nullable=False)
+    trading_date:   Mapped[date]           = mapped_column(Date,       nullable=False)
+    open_price:     Mapped[Optional[float]] = mapped_column(Float,     nullable=True)
+    high_price:     Mapped[Optional[float]] = mapped_column(Float,     nullable=True)
+    low_price:      Mapped[Optional[float]] = mapped_column(Float,     nullable=True)
+    close_price:    Mapped[Optional[float]] = mapped_column(Float,     nullable=True)
+    adjusted_close: Mapped[Optional[float]] = mapped_column(Float,     nullable=True)
+    volume: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "ticker", "trading_date",
+            name="uq_stock_prices_ticker_date",
+        ),
+        Index("ix_stock_prices_ticker",      "ticker"),
+        Index("ix_stock_prices_ticker_date", "ticker", "trading_date"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<StockPrice id={self.id} ticker={self.ticker!r} "
+            f"date={self.trading_date} close={self.close_price}>"
         )
