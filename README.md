@@ -8,13 +8,13 @@ Real-time financial news sentiment analytics and stock movement prediction pipel
 
 This project ingests financial news articles via [Finnhub](https://finnhub.io), enriches them with FinBERT sentiment scores, and lays the groundwork for downstream stock movement prediction.
 
-| Phase | Status | Description |
-|-------|--------|-------------|
-| Phase 1 | ✅ Complete | Finnhub news ingestion → `data/raw/` |
-| Phase 2 | ✅ Complete | FinBERT sentiment analysis → `data/processed/` |
+| Phase   | Status      | Description                                                |
+| ------- | ----------- | ---------------------------------------------------------- |
+| Phase 1 | ✅ Complete | Finnhub news ingestion → `data/raw/`                       |
+| Phase 2 | ✅ Complete | FinBERT sentiment analysis → `data/processed/`             |
 | Phase 3 | ✅ Complete | PostgreSQL storage → `news_articles` + `sentiment_results` |
-| Phase 4 | ✅ Complete | Feature engineering → `data/features/` |
-| Phase 5 | 🔜 Planned | XGBoost stock movement prediction |
+| Phase 4 | ✅ Complete | Feature engineering → `data/features/`                     |
+| Phase 5 | 🔜 Planned  | XGBoost stock movement prediction                          |
 
 ---
 
@@ -77,7 +77,7 @@ source .venv/bin/activate       # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Configure environment
+### 2. Configure environment of the Project
 
 ```bash
 cp .env.example .env
@@ -92,12 +92,12 @@ python scripts/fetch_news.py
 
 Options:
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--tickers AAPL TSLA` | from `.env` | Tickers to fetch |
-| `--days 7` | from `.env` | Lookback window (days) |
-| `--log-level INFO` | from `.env` | Verbosity |
-| `--dry-run` | — | Print config and exit |
+| Flag                  | Default     | Description            |
+| --------------------- | ----------- | ---------------------- |
+| `--tickers AAPL TSLA` | from `.env` | Tickers to fetch       |
+| `--days 7`            | from `.env` | Lookback window (days) |
+| `--log-level INFO`    | from `.env` | Verbosity              |
+| `--dry-run`           | —           | Print config and exit  |
 
 Output: `data/raw/<TICKER>_news_<YYYY-MM-DD>.csv` + `data/raw/summary_<YYYY-MM-DD>.csv`
 
@@ -109,15 +109,15 @@ python scripts/run_sentiment.py
 
 Options:
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--tickers AAPL TSLA` | all CSVs for today | Tickers to process |
-| `--date 2026-06-15` | today | Date tag of input CSVs |
-| `--model ProsusAI/finbert` | from `.env` | Hugging Face model ID |
-| `--batch-size 32` | from `.env` | Inference batch size |
-| `--device auto` | from `.env` | `auto` / `cpu` / `cuda` / `mps` |
-| `--log-level INFO` | from `.env` | Verbosity |
-| `--dry-run` | — | Print config and exit |
+| Flag                       | Default            | Description                     |
+| -------------------------- | ------------------ | ------------------------------- |
+| `--tickers AAPL TSLA`      | all CSVs for today | Tickers to process              |
+| `--date 2026-06-15`        | today              | Date tag of input CSVs          |
+| `--model ProsusAI/finbert` | from `.env`        | Hugging Face model ID           |
+| `--batch-size 32`          | from `.env`        | Inference batch size            |
+| `--device auto`            | from `.env`        | `auto` / `cpu` / `cuda` / `mps` |
+| `--log-level INFO`         | from `.env`        | Verbosity                       |
+| `--dry-run`                | —                  | Print config and exit           |
 
 Output: `data/processed/<TICKER>_sentiment_<YYYY-MM-DD>.csv` + `data/processed/sentiment_summary_<YYYY-MM-DD>.csv`
 
@@ -129,14 +129,14 @@ python scripts/load_to_db.py --create-tables
 
 Options:
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--tickers AAPL TSLA` | all CSVs for today | Tickers to load |
-| `--date 2026-06-16` | today | Date tag of processed CSVs |
-| `--model-name ProsusAI/finbert` | from `.env` | Model name stored in DB |
-| `--create-tables` | — | Run `CREATE TABLE IF NOT EXISTS` before loading |
-| `--log-level INFO` | from `.env` | Verbosity |
-| `--dry-run` | — | Print config and exit |
+| Flag                            | Default            | Description                                     |
+| ------------------------------- | ------------------ | ----------------------------------------------- |
+| `--tickers AAPL TSLA`           | all CSVs for today | Tickers to load                                 |
+| `--date 2026-06-16`             | today              | Date tag of processed CSVs                      |
+| `--model-name ProsusAI/finbert` | from `.env`        | Model name stored in DB                         |
+| `--create-tables`               | —                  | Run `CREATE TABLE IF NOT EXISTS` before loading |
+| `--log-level INFO`              | from `.env`        | Verbosity                                       |
+| `--dry-run`                     | —                  | Print config and exit                           |
 
 Output: rows upserted into `news_articles` and `sentiment_results` tables.
 
@@ -148,14 +148,14 @@ python scripts/generate_features.py --date 2026-06-16
 
 Options:
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--tickers AAPL TSLA` | all tickers in DB | Tickers to generate features for |
-| `--date 2026-06-16` | today | Target date |
-| `--output-dir PATH` | `data/features/` | Directory for output CSV |
-| `--lookback-days 7` | `7` | History window for rolling features |
-| `--log-level INFO` | from `.env` | Verbosity |
-| `--dry-run` | — | Print config and exit |
+| Flag                  | Default           | Description                         |
+| --------------------- | ----------------- | ----------------------------------- |
+| `--tickers AAPL TSLA` | all tickers in DB | Tickers to generate features for    |
+| `--date 2026-06-16`   | today             | Target date                         |
+| `--output-dir PATH`   | `data/features/`  | Directory for output CSV            |
+| `--lookback-days 7`   | `7`               | History window for rolling features |
+| `--log-level INFO`    | from `.env`       | Verbosity                           |
+| `--dry-run`           | —                 | Print config and exit               |
 
 Output: `data/features/feature_dataset_<YYYY-MM-DD>.csv`
 
@@ -165,29 +165,29 @@ Output: `data/features/feature_dataset_<YYYY-MM-DD>.csv`
 
 ### Phase 1 — Raw news (`data/raw/<TICKER>_news_<date>.csv`)
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `ticker` | str | Ticker symbol |
-| `source_id` | str | Finnhub article ID |
-| `source_name` | str | Publisher name |
-| `author` | null | Not provided by Finnhub |
-| `title` | str | Article headline |
-| `description` | str | Article summary |
-| `url` | str | Article URL |
-| `published_at` | datetime (UTC) | Publication timestamp |
-| `content` | null | Not provided by Finnhub |
-| `fetched_at` | datetime (UTC) | Fetch timestamp |
+| Column         | Type           | Description             |
+| -------------- | -------------- | ----------------------- |
+| `ticker`       | str            | Ticker symbol           |
+| `source_id`    | str            | Finnhub article ID      |
+| `source_name`  | str            | Publisher name          |
+| `author`       | null           | Not provided by Finnhub |
+| `title`        | str            | Article headline        |
+| `description`  | str            | Article summary         |
+| `url`          | str            | Article URL             |
+| `published_at` | datetime (UTC) | Publication timestamp   |
+| `content`      | null           | Not provided by Finnhub |
+| `fetched_at`   | datetime (UTC) | Fetch timestamp         |
 
 ### Phase 2 — Sentiment-enriched (`data/processed/<TICKER>_sentiment_<date>.csv`)
 
 All Phase 1 columns plus:
 
-| Column | Type | Values |
-|--------|------|--------|
-| `sentiment_label` | str | `positive` / `neutral` / `negative` |
-| `sentiment_score` | int | `+1` / `0` / `-1` |
-| `sentiment_confidence` | float | Softmax probability in [0, 1] |
-| `analysed_at` | str (ISO-8601) | UTC timestamp of inference |
+| Column                 | Type           | Values                              |
+| ---------------------- | -------------- | ----------------------------------- |
+| `sentiment_label`      | str            | `positive` / `neutral` / `negative` |
+| `sentiment_score`      | int            | `+1` / `0` / `-1`                   |
+| `sentiment_confidence` | float          | Softmax probability in [0, 1]       |
+| `analysed_at`          | str (ISO-8601) | UTC timestamp of inference          |
 
 ---
 
@@ -197,11 +197,11 @@ All Phase 1 columns plus:
 
 FinBERT is a BERT model fine-tuned on financial news corpora for sentiment classification. It outperforms general-purpose BERT variants on financial text.
 
-| Label | Score | Meaning |
-|-------|-------|---------|
-| positive | +1 | Bullish signal |
-| neutral | 0 | No directional signal |
-| negative | -1 | Bearish signal |
+| Label    | Score | Meaning               |
+| -------- | ----- | --------------------- |
+| positive | +1    | Bullish signal        |
+| neutral  | 0     | No directional signal |
+| negative | -1    | Bearish signal        |
 
 **Input text:** `"<title>. <description>"` (or just `<title>` if description is absent).
 
@@ -213,16 +213,16 @@ FinBERT is a BERT model fine-tuned on financial news corpora for sentiment class
 
 All settings are managed via environment variables (or `.env`):
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `FINNHUB_API_KEY` | **required** | Finnhub API key |
-| `TICKERS` | `AAPL,TSLA,NVDA,MSFT,AMZN` | Default ticker list |
-| `NEWS_LOOKBACK_DAYS` | `7` | Days of news history to fetch |
-| `LOG_LEVEL` | `INFO` | Logging verbosity |
-| `FINBERT_MODEL` | `ProsusAI/finbert` | Hugging Face model ID |
-| `FINBERT_BATCH_SIZE` | `32` | Inference batch size |
-| `FINBERT_DEVICE` | `auto` | Compute device (`auto`/`cpu`/`cuda`/`mps`) |
-| `DATABASE_URL` | `None` | PostgreSQL connection URL (Phase 3 only) |
+| Variable             | Default                    | Description                                |
+| -------------------- | -------------------------- | ------------------------------------------ |
+| `FINNHUB_API_KEY`    | **required**               | Finnhub API key                            |
+| `TICKERS`            | `AAPL,TSLA,NVDA,MSFT,AMZN` | Default ticker list                        |
+| `NEWS_LOOKBACK_DAYS` | `7`                        | Days of news history to fetch              |
+| `LOG_LEVEL`          | `INFO`                     | Logging verbosity                          |
+| `FINBERT_MODEL`      | `ProsusAI/finbert`         | Hugging Face model ID                      |
+| `FINBERT_BATCH_SIZE` | `32`                       | Inference batch size                       |
+| `FINBERT_DEVICE`     | `auto`                     | Compute device (`auto`/`cpu`/`cuda`/`mps`) |
+| `DATABASE_URL`       | `None`                     | PostgreSQL connection URL (Phase 3 only)   |
 
 ---
 
@@ -356,49 +356,49 @@ Each row in the output dataset represents one ticker on one date.
 
 #### Sentiment Features (11)
 
-| Feature | Description |
-|---------|-------------|
-| `article_count` | Total articles on the target date |
-| `positive_count` | Articles with `sentiment_label == "positive"` |
-| `neutral_count` | Articles with `sentiment_label == "neutral"` |
-| `negative_count` | Articles with `sentiment_label == "negative"` |
-| `positive_ratio` | `positive_count / article_count` |
-| `neutral_ratio` | `neutral_count / article_count` |
-| `negative_ratio` | `negative_count / article_count` |
-| `mean_sentiment_score` | Mean of `sentiment_score` (−1 / 0 / +1) on target date |
-| `sentiment_score_std` | Sample std-dev of `sentiment_score` (0 for single-article days) |
-| `sentiment_score_min` | Min `sentiment_score` on target date |
-| `sentiment_score_max` | Max `sentiment_score` on target date |
+| Feature                | Description                                                     |
+| ---------------------- | --------------------------------------------------------------- |
+| `article_count`        | Total articles on the target date                               |
+| `positive_count`       | Articles with `sentiment_label == "positive"`                   |
+| `neutral_count`        | Articles with `sentiment_label == "neutral"`                    |
+| `negative_count`       | Articles with `sentiment_label == "negative"`                   |
+| `positive_ratio`       | `positive_count / article_count`                                |
+| `neutral_ratio`        | `neutral_count / article_count`                                 |
+| `negative_ratio`       | `negative_count / article_count`                                |
+| `mean_sentiment_score` | Mean of `sentiment_score` (−1 / 0 / +1) on target date          |
+| `sentiment_score_std`  | Sample std-dev of `sentiment_score` (0 for single-article days) |
+| `sentiment_score_min`  | Min `sentiment_score` on target date                            |
+| `sentiment_score_max`  | Max `sentiment_score` on target date                            |
 
 #### Source Features (4)
 
-| Feature | Description |
-|---------|-------------|
-| `unique_source_count` | Number of distinct `source_name` values |
-| `yahoo_article_count` | Articles whose `source_name` contains `"yahoo"` (case-insensitive) |
-| `benzinga_article_count` | Articles whose `source_name` contains `"benzinga"` |
-| `cnbc_article_count` | Articles whose `source_name` contains `"cnbc"` |
+| Feature                  | Description                                                        |
+| ------------------------ | ------------------------------------------------------------------ |
+| `unique_source_count`    | Number of distinct `source_name` values                            |
+| `yahoo_article_count`    | Articles whose `source_name` contains `"yahoo"` (case-insensitive) |
+| `benzinga_article_count` | Articles whose `source_name` contains `"benzinga"`                 |
+| `cnbc_article_count`     | Articles whose `source_name` contains `"cnbc"`                     |
 
 #### Time Features (3)
 
 All windows end on (and include) the target date.
 
-| Feature | Window |
-|---------|--------|
-| `articles_last_24h` | Articles published on exactly the target date |
-| `articles_last_3d` | Articles in `[target_date − 2 d, target_date]` |
-| `articles_last_7d` | Articles in `[target_date − 6 d, target_date]` |
+| Feature             | Window                                         |
+| ------------------- | ---------------------------------------------- |
+| `articles_last_24h` | Articles published on exactly the target date  |
+| `articles_last_3d`  | Articles in `[target_date − 2 d, target_date]` |
+| `articles_last_7d`  | Articles in `[target_date − 6 d, target_date]` |
 
 #### Rolling Features (4)
 
 Rolling means are computed from **daily aggregates** — each calendar day contributes one data point (its daily mean sentiment) regardless of article volume. This gives days equal weight and produces a smoother, less volume-biased signal.
 
-| Feature | Window | Description |
-|---------|--------|-------------|
+| Feature                     | Window | Description                                    |
+| --------------------------- | ------ | ---------------------------------------------- |
 | `rolling_3d_mean_sentiment` | 3 days | Mean of the last 3 daily mean sentiment scores |
 | `rolling_7d_mean_sentiment` | 7 days | Mean of the last 7 daily mean sentiment scores |
-| `rolling_3d_article_volume` | 3 days | Total article count in the last 3 days |
-| `rolling_7d_article_volume` | 7 days | Total article count in the last 7 days |
+| `rolling_3d_article_volume` | 3 days | Total article count in the last 3 days         |
+| `rolling_7d_article_volume` | 7 days | Total article count in the last 7 days         |
 
 ### Example Output
 
