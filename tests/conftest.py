@@ -8,6 +8,7 @@ tries to read from .env. This lets tests run in CI without real API keys.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -26,5 +27,7 @@ def mock_settings(monkeypatch):
     fake.finbert_device = "auto"
     fake.database_url = None
 
-    with patch("src.ingestion.news_client.settings", fake):
+    with ExitStack() as stack:
+        stack.enter_context(patch("src.ingestion.news_client.settings", fake))
+        stack.enter_context(patch("src.features.feature_engineer.settings", fake))
         yield fake

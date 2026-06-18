@@ -13,7 +13,8 @@ This project ingests financial news articles via [Finnhub](https://finnhub.io), 
 | Phase 1 | ✅ Complete | Finnhub news ingestion → `data/raw/` |
 | Phase 2 | ✅ Complete | FinBERT sentiment analysis → `data/processed/` |
 | Phase 3 | ✅ Complete | PostgreSQL storage → `news_articles` + `sentiment_results` |
-| Phase 4 | 🔜 Planned | Feature engineering + ML model |
+| Phase 4 | ✅ Complete | Feature engineering → `data/features/` |
+| Phase 5 | 🔜 Planned | XGBoost stock movement prediction |
 
 ---
 
@@ -24,7 +25,8 @@ financial-news-analytics/
 ├── scripts/
 │   ├── fetch_news.py          # Phase 1: fetch news from Finnhub
 │   ├── run_sentiment.py       # Phase 2: run FinBERT sentiment analysis
-│   └── load_to_db.py          # Phase 3: load processed CSVs into PostgreSQL
+│   ├── load_to_db.py          # Phase 3: load processed CSVs into PostgreSQL
+│   └── generate_features.py   # Phase 4: generate ML feature dataset
 │
 ├── src/
 │   ├── ingestion/
@@ -35,6 +37,8 @@ financial-news-analytics/
 │   │   ├── database.py        # Engine, session factory, DDL
 │   │   ├── models.py          # SQLAlchemy ORM models
 │   │   └── repository.py      # Upsert, bulk insert, queries
+│   ├── features/
+│   │   └── feature_engineer.py    # Phase 4: feature computation
 │   └── utils/
 │       ├── config.py          # Pydantic settings (env-based)
 │       ├── logger.py          # Structured logging
@@ -45,11 +49,13 @@ financial-news-analytics/
 │   └── unit/
 │       ├── test_news_client.py
 │       ├── test_sentiment_analyzer.py
-│       └── test_repository.py     # Phase 3: SQLite in-memory tests
+│       ├── test_repository.py         # Phase 3: SQLite in-memory tests
+│       └── test_feature_engineer.py   # Phase 4: 80 unit tests
 │
 ├── data/
 │   ├── raw/                   # Phase 1 output (gitignored)
-│   └── processed/             # Phase 2 output (gitignored)
+│   ├── processed/             # Phase 2 output (gitignored)
+│   └── features/              # Phase 4 output (gitignored)
 │
 ├── .env.example               # Environment variable template
 ├── requirements.txt           # Runtime dependencies
@@ -133,6 +139,25 @@ Options:
 | `--dry-run` | — | Print config and exit |
 
 Output: rows upserted into `news_articles` and `sentiment_results` tables.
+
+### 6. Run Phase 4 — Feature engineering
+
+```bash
+python scripts/generate_features.py --date 2026-06-16
+```
+
+Options:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--tickers AAPL TSLA` | all tickers in DB | Tickers to generate features for |
+| `--date 2026-06-16` | today | Target date |
+| `--output-dir PATH` | `data/features/` | Directory for output CSV |
+| `--lookback-days 7` | `7` | History window for rolling features |
+| `--log-level INFO` | from `.env` | Verbosity |
+| `--dry-run` | — | Print config and exit |
+
+Output: `data/features/feature_dataset_<YYYY-MM-DD>.csv`
 
 ---
 
@@ -290,3 +315,95 @@ sentiment_results
 ```
 
 Re-running `load_to_db.py` is always safe — both tables use `ON CONFLICT DO UPDATE` (PostgreSQL) or SELECT-then-UPDATE (SQLite/tests), so existing rows are refreshed rather than duplicated.
+
+---
+
+## Phase 4 — Feature Engineering
+
+### Architecture
+
+`FeatureEngineer` is the central class in `src/features/feature_engineer.py`. It follows the same patterns as the rest of the pipeline: repository pattern, typed exceptions, structured logging, and clean separation between I/O and computation.
+
+```
+PostgreSQL
+  news_articles + sentiment_results
+          │
+          │  load_data()  (SQL JOIN → pandas DataFrame)
+          ▼
+  raw_df  (ticker, source_name, published_at, date,
+           sentiment_label, sentiment_score, sentiment_confidence)
+          │
+          │  generate_features()  (per-ticker feature computation)
+          ▼
+  features_df  (one row per ticker — 25 columns)
+          │
+          │  save_features()
+          ▼
+  data/features/feature_dataset_<date>.csv
+```
+
+#### Exception hierarchy
+
+```
+FeatureEngineeringError          (base)
+├── DataLoadError                (database connectivity / query failure)
+└── FeatureGenerationError       (empty input / no articles on target date)
+```
+
+### Feature Definitions
+
+Each row in the output dataset represents one ticker on one date.
+
+#### Sentiment Features (11)
+
+| Feature | Description |
+|---------|-------------|
+| `article_count` | Total articles on the target date |
+| `positive_count` | Articles with `sentiment_label == "positive"` |
+| `neutral_count` | Articles with `sentiment_label == "neutral"` |
+| `negative_count` | Articles with `sentiment_label == "negative"` |
+| `positive_ratio` | `positive_count / article_count` |
+| `neutral_ratio` | `neutral_count / article_count` |
+| `negative_ratio` | `negative_count / article_count` |
+| `mean_sentiment_score` | Mean of `sentiment_score` (−1 / 0 / +1) on target date |
+| `sentiment_score_std` | Sample std-dev of `sentiment_score` (0 for single-article days) |
+| `sentiment_score_min` | Min `sentiment_score` on target date |
+| `sentiment_score_max` | Max `sentiment_score` on target date |
+
+#### Source Features (4)
+
+| Feature | Description |
+|---------|-------------|
+| `unique_source_count` | Number of distinct `source_name` values |
+| `yahoo_article_count` | Articles whose `source_name` contains `"yahoo"` (case-insensitive) |
+| `benzinga_article_count` | Articles whose `source_name` contains `"benzinga"` |
+| `cnbc_article_count` | Articles whose `source_name` contains `"cnbc"` |
+
+#### Time Features (3)
+
+All windows end on (and include) the target date.
+
+| Feature | Window |
+|---------|--------|
+| `articles_last_24h` | Articles published on exactly the target date |
+| `articles_last_3d` | Articles in `[target_date − 2 d, target_date]` |
+| `articles_last_7d` | Articles in `[target_date − 6 d, target_date]` |
+
+#### Rolling Features (4)
+
+Rolling means are computed from **daily aggregates** — each calendar day contributes one data point (its daily mean sentiment) regardless of article volume. This gives days equal weight and produces a smoother, less volume-biased signal.
+
+| Feature | Window | Description |
+|---------|--------|-------------|
+| `rolling_3d_mean_sentiment` | 3 days | Mean of the last 3 daily mean sentiment scores |
+| `rolling_7d_mean_sentiment` | 7 days | Mean of the last 7 daily mean sentiment scores |
+| `rolling_3d_article_volume` | 3 days | Total article count in the last 3 days |
+| `rolling_7d_article_volume` | 7 days | Total article count in the last 7 days |
+
+### Example Output
+
+```
+ticker,date,article_count,positive_count,neutral_count,negative_count,positive_ratio,neutral_ratio,negative_ratio,mean_sentiment_score,sentiment_score_std,sentiment_score_min,sentiment_score_max,unique_source_count,yahoo_article_count,benzinga_article_count,cnbc_article_count,articles_last_24h,articles_last_3d,articles_last_7d,rolling_3d_mean_sentiment,rolling_7d_mean_sentiment,rolling_3d_article_volume,rolling_7d_article_volume
+AAPL,2026-06-16,246,69,109,68,0.280488,0.443089,0.276422,0.004065,0.816517,-1,1,12,87,42,18,246,531,1203,0.012341,0.008922,531,1203
+TSLA,2026-06-16,183,42,91,50,0.229508,0.497268,0.273224,-0.043716,0.803214,-1,1,9,61,38,14,183,402,954,-0.018234,-0.011203,402,954
+```
