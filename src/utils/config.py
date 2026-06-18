@@ -66,6 +66,28 @@ class Settings(BaseSettings):
         description="Logging verbosity: DEBUG | INFO | WARNING | ERROR",
     )
 
+    # ── Phase 2: FinBERT sentiment analysis ──────────────────────────────────
+    finbert_model: str = Field(
+        default="ProsusAI/finbert",
+        description="Hugging Face model identifier for FinBERT sentiment analysis",
+    )
+
+    finbert_batch_size: int = Field(
+        default=32,
+        ge=1,
+        le=512,
+        description="Number of articles per inference batch (higher = faster, more VRAM)",
+    )
+
+    finbert_device: str = Field(
+        default="auto",
+        description=(
+            "Compute device for model inference. "
+            "'auto' selects CUDA → MPS → CPU. "
+            "Explicit values: 'cpu', 'cuda', 'mps'."
+        ),
+    )
+
     # ── Validators ───────────────────────────────────────────────────────────
     @field_validator("tickers", mode="before")
     @classmethod

@@ -21,6 +21,9 @@ def mock_settings(monkeypatch):
     fake.tickers = ["AAPL", "TSLA"]
     fake.news_lookback_days = 7
     fake.log_level = "DEBUG"
+    fake.finbert_model = "ProsusAI/finbert"
+    fake.finbert_batch_size = 32
+    fake.finbert_device = "auto"
 
     with patch("src.ingestion.news_client.settings", fake):
         yield fake
