@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import sys
 
+from typing import Optional
+
 from pydantic import Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -85,6 +87,16 @@ class Settings(BaseSettings):
             "Compute device for model inference. "
             "'auto' selects CUDA → MPS → CPU. "
             "Explicit values: 'cpu', 'cuda', 'mps'."
+        ),
+    )
+
+    # ── Phase 3: PostgreSQL storage ──────────────────────────────────────────
+    database_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "SQLAlchemy-compatible PostgreSQL connection URL. "
+            "Required for Phase 3 (scripts/load_to_db.py). "
+            "Example: postgresql://user:password@localhost:5432/financial_news"
         ),
     )
 

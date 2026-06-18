@@ -24,6 +24,7 @@ def mock_settings(monkeypatch):
     fake.finbert_model = "ProsusAI/finbert"
     fake.finbert_batch_size = 32
     fake.finbert_device = "auto"
+    fake.database_url = None
 
     with patch("src.ingestion.news_client.settings", fake):
         yield fake

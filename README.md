@@ -12,7 +12,8 @@ This project ingests financial news articles via [Finnhub](https://finnhub.io), 
 |-------|--------|-------------|
 | Phase 1 | ✅ Complete | Finnhub news ingestion → `data/raw/` |
 | Phase 2 | ✅ Complete | FinBERT sentiment analysis → `data/processed/` |
-| Phase 3 | 🔜 Planned | Feature engineering + ML model |
+| Phase 3 | ✅ Complete | PostgreSQL storage → `news_articles` + `sentiment_results` |
+| Phase 4 | 🔜 Planned | Feature engineering + ML model |
 
 ---
 
@@ -22,13 +23,18 @@ This project ingests financial news articles via [Finnhub](https://finnhub.io), 
 financial-news-analytics/
 ├── scripts/
 │   ├── fetch_news.py          # Phase 1: fetch news from Finnhub
-│   └── run_sentiment.py       # Phase 2: run FinBERT sentiment analysis
+│   ├── run_sentiment.py       # Phase 2: run FinBERT sentiment analysis
+│   └── load_to_db.py          # Phase 3: load processed CSVs into PostgreSQL
 │
 ├── src/
 │   ├── ingestion/
 │   │   └── news_client.py     # Finnhub API client
 │   ├── processing/
 │   │   └── sentiment_analyzer.py  # FinBERT sentiment pipeline
+│   ├── storage/
+│   │   ├── database.py        # Engine, session factory, DDL
+│   │   ├── models.py          # SQLAlchemy ORM models
+│   │   └── repository.py      # Upsert, bulk insert, queries
 │   └── utils/
 │       ├── config.py          # Pydantic settings (env-based)
 │       ├── logger.py          # Structured logging
@@ -38,7 +44,8 @@ financial-news-analytics/
 │   ├── conftest.py            # Shared fixtures (settings mock)
 │   └── unit/
 │       ├── test_news_client.py
-│       └── test_sentiment_analyzer.py
+│       ├── test_sentiment_analyzer.py
+│       └── test_repository.py     # Phase 3: SQLite in-memory tests
 │
 ├── data/
 │   ├── raw/                   # Phase 1 output (gitignored)
@@ -108,6 +115,25 @@ Options:
 
 Output: `data/processed/<TICKER>_sentiment_<YYYY-MM-DD>.csv` + `data/processed/sentiment_summary_<YYYY-MM-DD>.csv`
 
+### 5. Run Phase 3 — Load to PostgreSQL
+
+```bash
+python scripts/load_to_db.py --create-tables
+```
+
+Options:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--tickers AAPL TSLA` | all CSVs for today | Tickers to load |
+| `--date 2026-06-16` | today | Date tag of processed CSVs |
+| `--model-name ProsusAI/finbert` | from `.env` | Model name stored in DB |
+| `--create-tables` | — | Run `CREATE TABLE IF NOT EXISTS` before loading |
+| `--log-level INFO` | from `.env` | Verbosity |
+| `--dry-run` | — | Print config and exit |
+
+Output: rows upserted into `news_articles` and `sentiment_results` tables.
+
 ---
 
 ## Data Schemas
@@ -171,6 +197,7 @@ All settings are managed via environment variables (or `.env`):
 | `FINBERT_MODEL` | `ProsusAI/finbert` | Hugging Face model ID |
 | `FINBERT_BATCH_SIZE` | `32` | Inference batch size |
 | `FINBERT_DEVICE` | `auto` | Compute device (`auto`/`cpu`/`cuda`/`mps`) |
+| `DATABASE_URL` | `None` | PostgreSQL connection URL (Phase 3 only) |
 
 ---
 
@@ -184,7 +211,7 @@ pytest tests/unit/test_sentiment_analyzer.py   # Phase 2 tests only
 pytest --cov=src --cov-report=term-missing     # with coverage
 ```
 
-All unit tests mock the Hugging Face pipeline — no model download is needed for testing.
+All unit tests mock the Hugging Face pipeline and use an in-memory SQLite database — no model download and no PostgreSQL instance are needed for testing.
 
 ---
 
@@ -212,3 +239,54 @@ Phase 2 automatically detects and uses available hardware:
 - **CPU** — default fallback; slower but always available
 
 Set `FINBERT_DEVICE=cpu` to force CPU inference regardless of available hardware.
+
+---
+
+## Database Setup (Phase 3)
+
+```bash
+# Start a local PostgreSQL instance (example with Docker)
+docker run -d \
+  --name finews-pg \
+  -e POSTGRES_DB=financial_news \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  -p 5432:5432 \
+  postgres:16
+
+# Add to .env
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/financial_news
+
+# Create tables + load first batch
+python scripts/load_to_db.py --create-tables
+```
+
+### Database Schema
+
+```
+news_articles
+├── id              BIGINT PK (auto-increment)
+├── ticker          VARCHAR(10)
+├── source_id       VARCHAR(64)
+├── source_name     VARCHAR(255)
+├── author          TEXT (nullable)
+├── title           TEXT
+├── description     TEXT (nullable)
+├── url             TEXT  ← UNIQUE (dedup key)
+├── published_at    TIMESTAMPTZ
+├── content         TEXT (nullable)
+├── fetched_at      TIMESTAMPTZ
+└── created_at      TIMESTAMPTZ (server default)
+
+sentiment_results
+├── id                   BIGINT PK (auto-increment)
+├── article_id           BIGINT FK → news_articles.id (CASCADE)
+├── model_name           VARCHAR(255)        ← UNIQUE with article_id
+├── sentiment_label      VARCHAR(10)
+├── sentiment_score      SMALLINT (-1, 0, +1)
+├── sentiment_confidence FLOAT
+├── analysed_at          TIMESTAMPTZ
+└── created_at           TIMESTAMPTZ (server default)
+```
+
+Re-running `load_to_db.py` is always safe — both tables use `ON CONFLICT DO UPDATE` (PostgreSQL) or SELECT-then-UPDATE (SQLite/tests), so existing rows are refreshed rather than duplicated.
