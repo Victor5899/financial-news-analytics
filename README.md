@@ -15,7 +15,8 @@ This project ingests financial news articles via [Finnhub](https://finnhub.io), 
 | Phase 3 | ✅ Complete | PostgreSQL storage → `news_articles` + `sentiment_results`          |
 | Phase 4 | ✅ Complete | Feature engineering → `data/features/`                              |
 | Phase 5 | ✅ Complete | Stock price ingestion (Yahoo Finance / yfinance) → `stock_prices`   |
-| Phase 6 | 🔜 Planned  | ML training — XGBoost stock movement prediction                     |
+| Phase 6 | ✅ Complete | ML dataset builder — feature + label generation → `data/ml/`        |
+| Phase 7 | 🔜 Planned  | ML training — XGBoost stock movement prediction                     |
 
 ---
 
@@ -28,7 +29,8 @@ financial-news-analytics/
 │   ├── run_sentiment.py       # Phase 2: run FinBERT sentiment analysis
 │   ├── load_to_db.py          # Phase 3: load processed CSVs into PostgreSQL
 │   ├── generate_features.py   # Phase 4: generate ML feature dataset
-│   └── fetch_prices.py        # Phase 5: ingest stock prices from Yahoo Finance
+│   ├── fetch_prices.py        # Phase 5: ingest stock prices from Yahoo Finance
+│   └── build_ml_dataset.py    # Phase 6: build supervised ML dataset with labels
 │
 ├── src/
 │   ├── ingestion/
@@ -44,6 +46,8 @@ financial-news-analytics/
 │   ├── prices/
 │   │   ├── price_client.py    # Phase 5: Yahoo Finance / yfinance client
 │   │   └── price_repository.py    # Phase 5: stock_prices DB access layer
+│   ├── ml/
+│   │   └── dataset_builder.py     # Phase 6: ML dataset + label generation
 │   └── utils/
 │       ├── config.py          # Pydantic settings (env-based)
 │       ├── logger.py          # Structured logging
@@ -57,12 +61,14 @@ financial-news-analytics/
 │       ├── test_repository.py         # Phase 3: SQLite in-memory tests
 │       ├── test_feature_engineer.py   # Phase 4: 80 unit tests
 │       ├── test_price_client.py       # Phase 5: 62 unit tests (yfinance mocked)
-│       └── test_price_repository.py   # Phase 5: 60 unit tests (SQLite in-memory)
+│       ├── test_price_repository.py   # Phase 5: 60 unit tests (SQLite in-memory)
+│       └── test_dataset_builder.py    # Phase 6: 113 unit tests (SQLite in-memory)
 │
 ├── data/
 │   ├── raw/                   # Phase 1 output (gitignored)
 │   ├── processed/             # Phase 2 output (gitignored)
-│   └── features/              # Phase 4 output (gitignored)
+│   ├── features/              # Phase 4 output (gitignored)
+│   └── ml/                    # Phase 6 output (gitignored)
 │
 ├── .env.example               # Environment variable template
 ├── requirements.txt           # Runtime dependencies
@@ -499,3 +505,132 @@ ticker,date,article_count,positive_count,neutral_count,negative_count,positive_r
 AAPL,2026-06-16,246,69,109,68,0.280488,0.443089,0.276422,0.004065,0.816517,-1,1,12,87,42,18,246,531,1203,0.012341,0.008922,531,1203
 TSLA,2026-06-16,183,42,91,50,0.229508,0.497268,0.273224,-0.043716,0.803214,-1,1,9,61,38,14,183,402,954,-0.018234,-0.011203,402,954
 ```
+
+---
+
+## Phase 6 — ML Dataset Builder
+
+Phase 6 assembles the **supervised training dataset** that Phase 7 (XGBoost) consumes.  It joins the Phase 4 feature vectors with future stock price movements drawn from `stock_prices` to produce binary and multi-class labels for every (ticker, date) pair.
+
+### Pipeline Architecture
+
+```
+data/features/
+└── feature_dataset_<date>.csv     ← Phase 4 output
+         │
+         ▼
+ MLDatasetBuilder.load_features()
+         │
+         ▼
+ MLDatasetBuilder.load_prices()    ← PostgreSQL: stock_prices
+         │
+         ▼
+ MLDatasetBuilder.generate_labels()
+   ├── _compute_future_closes()    ← N-trading-day lookahead (index-based)
+   ├── _compute_returns()          ← (future - today) / today
+   ├── _compute_binary_labels()    ← 1 if return > 0 else 0
+   └── _compute_direction_label()  ← BUY / HOLD / SELL from 5d return
+         │
+         ▼
+ MLDatasetBuilder.build_dataset()  ← enforce column order
+         │
+         ▼
+data/ml/
+└── ml_dataset_<date>.csv          ← Phase 6 output → Phase 7 input
+```
+
+### Running Phase 6
+
+```bash
+# Build the ML dataset for today (reads matching feature_dataset_<today>.csv)
+python scripts/build_ml_dataset.py
+
+# Specific date
+python scripts/build_ml_dataset.py --date 2026-06-16
+
+# Custom output directory
+python scripts/build_ml_dataset.py --date 2026-06-16 --output-dir /tmp/ml
+
+# Extend the lookahead price window (default: 14 calendar days)
+python scripts/build_ml_dataset.py --date 2026-06-16 --lookahead-days 21
+
+# Dry-run: print config and exit without touching any data
+python scripts/build_ml_dataset.py --dry-run
+```
+
+### Label Generation Workflow
+
+For each `(ticker, date)` row in the feature dataset:
+
+1. **Locate today's close** — look up `close_price` for `date` in `stock_prices`.
+2. **Find future closes** — using a trading-day index (not calendar days), find the closing price N trading days ahead for N ∈ {1, 3, 5, 7}.
+3. **Compute returns** — apply the formula below.
+4. **Assign binary labels** — one label per horizon.
+5. **Assign direction label** — one multi-class label from the 5-day return.
+
+Rows for which any required future close is unavailable (e.g. data not yet ingested) are **logged and skipped** — they do not appear in the output dataset.
+
+### Future Return Formulas
+
+```
+return_Nd = (close_future_N - close_today) / close_today
+```
+
+| Column        | Lookahead |
+| ------------- | --------- |
+| `return_1d`   | 1 trading day  |
+| `return_3d`   | 3 trading days |
+| `return_5d`   | 5 trading days |
+| `return_7d`   | 7 trading days |
+
+> **Trading-day indexing** — the "Nth trading day ahead" skips weekends and market holidays automatically because only dates present in `stock_prices` are considered.
+
+### BUY / HOLD / SELL Definitions
+
+| Label  | Condition           |
+| ------ | ------------------- |
+| `BUY`  | `return_5d > 0.02`  |
+| `SELL` | `return_5d < -0.02` |
+| `HOLD` | otherwise           |
+
+The 2 % threshold on the 5-day return was chosen to filter out noise while still capturing meaningful directional moves.
+
+### ML Dataset Schema
+
+The output CSV contains **all Phase 4 feature columns** (23 columns) followed by **13 label columns** (36 total).
+
+#### Label Columns (13)
+
+| Column             | Type    | Description                                        |
+| ------------------ | ------- | -------------------------------------------------- |
+| `future_close_1d`  | float   | Closing price 1 trading day after target date      |
+| `future_close_3d`  | float   | Closing price 3 trading days after target date     |
+| `future_close_5d`  | float   | Closing price 5 trading days after target date     |
+| `future_close_7d`  | float   | Closing price 7 trading days after target date     |
+| `return_1d`        | float   | `(future_close_1d − close_today) / close_today`    |
+| `return_3d`        | float   | `(future_close_3d − close_today) / close_today`    |
+| `return_5d`        | float   | `(future_close_5d − close_today) / close_today`    |
+| `return_7d`        | float   | `(future_close_7d − close_today) / close_today`    |
+| `label_up_1d`      | int 0/1 | 1 if `return_1d > 0`                               |
+| `label_up_3d`      | int 0/1 | 1 if `return_3d > 0`                               |
+| `label_up_5d`      | int 0/1 | 1 if `return_5d > 0`                               |
+| `label_up_7d`      | int 0/1 | 1 if `return_7d > 0`                               |
+| `label_direction`  | str     | `BUY` / `HOLD` / `SELL` (from `return_5d`)         |
+
+### Example Output Row
+
+```
+ticker,date,...(23 feature cols)...,future_close_1d,future_close_3d,future_close_5d,future_close_7d,return_1d,return_3d,return_5d,return_7d,label_up_1d,label_up_3d,label_up_5d,label_up_7d,label_direction
+AAPL,2026-06-16,...,213.50,215.80,218.20,217.60,0.00704,0.01767,0.02898,0.02618,1,1,1,1,BUY
+TSLA,2026-06-16,...,248.30,244.10,241.50,246.80,-0.00682,-0.02282,-0.03243,-0.01082,0,0,0,0,SELL
+```
+
+### Missing Data Handling
+
+| Scenario | Behaviour |
+| -------- | --------- |
+| Ticker not in `stock_prices` | Row skipped, warning logged |
+| Feature date not in `stock_prices` | Row skipped, warning logged |
+| Insufficient future trading days | Row skipped, warning logged |
+| All required future closes missing | `LabelGenerationError` raised |
+| `NULL` close price in database | Treated as missing, row skipped |
