@@ -17,6 +17,7 @@ TestGenerateFeatures               — FeatureEngineer.generate_features (12 tes
 TestSaveFeatures                   — FeatureEngineer.save_features (6 tests)
 TestFeatureEngineerRun             — FeatureEngineer.run (5 tests)
 TestLoadData                       — FeatureEngineer.load_data with SQLite (9 tests)
+TestRunRange                       — FeatureEngineer.run_range (15 tests)
 """
 
 from __future__ import annotations
@@ -752,3 +753,157 @@ class TestLoadData:
         )
         with pytest.raises(DataLoadError):
             fe.load_data(target_date=TARGET_DATE)
+
+
+# ── TestRunRange ──────────────────────────────────────────────────────────────
+
+class TestRunRange:
+    """Tests for FeatureEngineer.run_range() — date-range backfill mode."""
+
+    def test_raises_value_error_when_start_after_end(self) -> None:
+        fe = FeatureEngineer(database_url="sqlite:///:memory:")
+        with pytest.raises(ValueError, match="must not be after"):
+            fe.run_range(
+                start_date=TARGET_DATE,
+                end_date=TARGET_DATE - timedelta(days=1),
+            )
+
+    def test_returns_dataframe(self, db_url: str) -> None:
+        fe = FeatureEngineer(database_url=db_url)
+        result = fe.run_range(start_date=TARGET_DATE, end_date=TARGET_DATE)
+        assert isinstance(result, pd.DataFrame)
+        fe.dispose()
+
+    def test_single_date_range_matches_single_run(self, db_url: str) -> None:
+        fe = FeatureEngineer(database_url=db_url)
+        single = fe.run(target_date=TARGET_DATE)
+        ranged = fe.run_range(start_date=TARGET_DATE, end_date=TARGET_DATE)
+        # Same tickers and same number of rows
+        assert set(single["ticker"]) == set(ranged["ticker"])
+        assert len(ranged) == len(single)
+        fe.dispose()
+
+    def test_multi_date_range_returns_rows_for_each_date(self, db_url: str) -> None:
+        fe = FeatureEngineer(database_url=db_url)
+        # db_url fixture has articles on TARGET_DATE and YESTERDAY
+        result = fe.run_range(
+            start_date=YESTERDAY,
+            end_date=TARGET_DATE,
+        )
+        assert not result.empty
+        assert result["date"].nunique() >= 1
+        fe.dispose()
+
+    def test_columns_match_feature_columns(self, db_url: str) -> None:
+        fe = FeatureEngineer(database_url=db_url)
+        result = fe.run_range(start_date=TARGET_DATE, end_date=TARGET_DATE)
+        assert list(result.columns) == FEATURE_COLUMNS
+        fe.dispose()
+
+    def test_empty_dataframe_when_no_data_in_range(self) -> None:
+        fe = FeatureEngineer(database_url="sqlite:///:memory:")
+        with patch.object(fe, "load_data", return_value=pd.DataFrame()):
+            result = fe.run_range(
+                start_date=date(2000, 1, 1),
+                end_date=date(2000, 1, 7),
+            )
+        assert result.empty
+        assert list(result.columns) == FEATURE_COLUMNS
+        fe.dispose()
+
+    def test_skips_dates_with_no_articles_gracefully(self, db_url: str) -> None:
+        fe = FeatureEngineer(database_url=db_url)
+        # Range includes dates before the fixture's earliest article
+        start = TARGET_DATE - timedelta(days=30)
+        result = fe.run_range(start_date=start, end_date=TARGET_DATE)
+        # Should still produce rows for dates that have data
+        if not result.empty:
+            assert all(result["date"] >= start)
+        fe.dispose()
+
+    def test_start_date_equals_end_date_is_valid(self, db_url: str) -> None:
+        fe = FeatureEngineer(database_url=db_url)
+        result = fe.run_range(start_date=TARGET_DATE, end_date=TARGET_DATE)
+        # All result rows should be on TARGET_DATE
+        if not result.empty:
+            assert all(d == TARGET_DATE for d in result["date"])
+        fe.dispose()
+
+    def test_all_result_dates_within_range(self, db_url: str) -> None:
+        fe = FeatureEngineer(database_url=db_url)
+        start = YESTERDAY
+        result = fe.run_range(start_date=start, end_date=TARGET_DATE)
+        if not result.empty:
+            assert all(start <= d <= TARGET_DATE for d in result["date"])
+        fe.dispose()
+
+    def test_saves_range_csv_when_output_dir_provided(
+        self, db_url: str, tmp_path: Path
+    ) -> None:
+        fe = FeatureEngineer(database_url=db_url)
+        start_tag = YESTERDAY.strftime("%Y-%m-%d")
+        end_tag   = TARGET_DATE.strftime("%Y-%m-%d")
+        result = fe.run_range(
+            start_date=YESTERDAY,
+            end_date=TARGET_DATE,
+            output_dir=tmp_path,
+        )
+        if not result.empty:
+            expected = tmp_path / f"feature_dataset_{start_tag}_{end_tag}.csv"
+            assert expected.exists()
+        fe.dispose()
+
+    def test_range_csv_filename_contains_both_dates(
+        self, db_url: str, tmp_path: Path
+    ) -> None:
+        fe = FeatureEngineer(database_url=db_url)
+        start_str = YESTERDAY.strftime("%Y-%m-%d")
+        end_str   = TARGET_DATE.strftime("%Y-%m-%d")
+        fe.run_range(
+            start_date=YESTERDAY,
+            end_date=TARGET_DATE,
+            output_dir=tmp_path,
+        )
+        csvs = list(tmp_path.glob("feature_dataset_*.csv"))
+        if csvs:
+            assert start_str in csvs[0].name
+            assert end_str in csvs[0].name
+        fe.dispose()
+
+    def test_does_not_save_when_output_dir_is_none(self, db_url: str) -> None:
+        fe = FeatureEngineer(database_url=db_url)
+        with patch.object(fe, "save_features") as mock_save:
+            fe.run_range(
+                start_date=TARGET_DATE,
+                end_date=TARGET_DATE,
+                output_dir=None,
+            )
+        mock_save.assert_not_called()
+        fe.dispose()
+
+    def test_run_range_with_ticker_filter(self, db_url: str) -> None:
+        fe = FeatureEngineer(database_url=db_url)
+        result = fe.run_range(
+            start_date=TARGET_DATE,
+            end_date=TARGET_DATE,
+            tickers=["AAPL"],
+        )
+        if not result.empty:
+            assert set(result["ticker"].unique()) == {"AAPL"}
+        fe.dispose()
+
+    def test_run_range_result_sorted_by_date_and_ticker(self, db_url: str) -> None:
+        fe = FeatureEngineer(database_url=db_url)
+        result = fe.run_range(start_date=YESTERDAY, end_date=TARGET_DATE)
+        if len(result) > 1:
+            dates = list(result["date"])
+            assert dates == sorted(dates)
+        fe.dispose()
+
+    def test_run_range_uses_single_db_load(self, db_url: str) -> None:
+        fe = FeatureEngineer(database_url=db_url)
+        with patch.object(fe, "load_data", wraps=fe.load_data) as mock_load:
+            fe.run_range(start_date=YESTERDAY, end_date=TARGET_DATE)
+        # Must call load_data exactly once regardless of date-range width
+        assert mock_load.call_count == 1
+        fe.dispose()

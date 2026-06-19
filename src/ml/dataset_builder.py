@@ -579,6 +579,88 @@ class MLDatasetBuilder:
         logger.info(f"Saved {len(dataset_df)} ML dataset row(s) → {out_path}")
         return out_path
 
+    def run_range(
+        self,
+        features_path: Path,
+        output_dir: Path | None = None,
+        lookahead_days: int = 14,
+    ) -> pd.DataFrame:
+        """
+        Build an ML dataset from a **multi-date** feature CSV.
+
+        Designed for historical backfill: the feature CSV may contain rows for
+        many different dates (e.g. the output of
+        ``generate_features.py --start-date … --end-date …``).  Labels are
+        generated independently for every ``(ticker, date)`` row using the
+        same logic as :meth:`run`.
+
+        The price window is widened to cover
+        ``[min_feature_date, max_feature_date + lookahead_days]`` so a single
+        database round-trip supplies all lookahead prices.
+
+        Parameters
+        ----------
+        features_path : Path
+            Path to a feature CSV with a ``date`` column that may span
+            multiple calendar days.
+        output_dir : Path | None
+            When provided the dataset is saved to
+            ``<output_dir>/ml_dataset_<min_date>_<max_date>.csv``.
+            If all dates in the CSV are the same, the filename uses just that
+            single date for consistency with single-date mode.
+        lookahead_days : int
+            Extra calendar days to load beyond ``max_feature_date``.
+            Default ``14`` covers 7 trading-day lookaheads for any week layout.
+
+        Returns
+        -------
+        pd.DataFrame
+            The final ML dataset with all available labels.
+
+        Raises
+        ------
+        DataLoadError
+            On feature file or database load failure.
+        LabelGenerationError
+            When no labeled rows can be produced.
+        """
+        features_df = self.load_features(features_path)
+
+        valid_dates = features_df["date"].dropna()
+        if valid_dates.empty:
+            raise DataLoadError(
+                f"Feature file has no valid dates: {features_path}"
+            )
+
+        min_date = min(valid_dates)
+        max_date = max(valid_dates)
+
+        logger.info(
+            f"run_range: feature date range {min_date} → {max_date}  "
+            f"({features_df['date'].nunique()} unique date(s), "
+            f"{len(features_df)} row(s))"
+        )
+
+        tickers   = features_df["ticker"].str.upper().unique().tolist()
+        price_end = max_date + timedelta(days=lookahead_days)
+
+        prices_df = self.load_prices(
+            tickers=tickers,
+            start_date=min_date,
+            end_date=price_end,
+        )
+
+        labeled_df  = self.generate_labels(features_df, prices_df)
+        dataset_df  = self.build_dataset(labeled_df)
+
+        if output_dir is not None:
+            start_tag = min_date.strftime("%Y-%m-%d")
+            end_tag   = max_date.strftime("%Y-%m-%d")
+            date_tag  = start_tag if start_tag == end_tag else f"{start_tag}_{end_tag}"
+            self.save_dataset(dataset_df, output_dir, date_tag)
+
+        return dataset_df
+
     def run(
         self,
         features_path: Path,

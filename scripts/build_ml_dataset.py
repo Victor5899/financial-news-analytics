@@ -14,6 +14,10 @@ Run from the project root
     # Specific date
     python scripts/build_ml_dataset.py --date 2026-06-16
 
+    # Historical backfill — supply a multi-date feature CSV directly
+    python scripts/build_ml_dataset.py \
+        --feature-file data/features/feature_dataset_2025-01-01_2026-06-01.csv
+
     # Custom output directory
     python scripts/build_ml_dataset.py --output-dir /tmp/ml
 
@@ -25,7 +29,8 @@ Run from the project root
 
 Output
 ------
-  data/ml/ml_dataset_<YYYY-MM-DD>.csv   — one row per ticker with labels
+  data/ml/ml_dataset_<YYYY-MM-DD>.csv              single-date mode
+  data/ml/ml_dataset_<start>_<end>.csv             date-range mode (--feature-file)
 """
 
 from __future__ import annotations
@@ -75,7 +80,22 @@ def _parse_args() -> argparse.Namespace:
         "--date",
         default=None,
         metavar="YYYY-MM-DD",
-        help="Target feature date (default: today)",
+        help=(
+            "Target feature date (default: today). "
+            "Cannot be combined with --feature-file."
+        ),
+    )
+    # ── Date-range backfill (additive, mutually exclusive with --date) ────────
+    parser.add_argument(
+        "--feature-file",
+        default=None,
+        metavar="PATH",
+        dest="feature_file",
+        help=(
+            "Explicit path to a feature CSV (enables range mode). "
+            "The date range is inferred from the CSV's 'date' column. "
+            "Cannot be combined with --date."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -91,8 +111,8 @@ def _parse_args() -> argparse.Namespace:
         metavar="N",
         dest="lookahead_days",
         help=(
-            "Calendar days beyond --date to load from stock_prices for "
-            "lookahead label computation"
+            "Calendar days beyond the feature date(s) to load from stock_prices "
+            "for lookahead label computation"
         ),
     )
     parser.add_argument(
@@ -109,7 +129,51 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# ── Console summary ───────────────────────────────────────────────────────────
+# ── Console summaries ─────────────────────────────────────────────────────────
+
+def _print_range_summary(
+    dataset_df,           # noqa: ANN001
+    features_path: Path,
+    out_path: Path | None,
+) -> None:
+    import pandas as pd  # noqa: PLC0415
+
+    print("\n" + "─" * 80)
+    print("  ML DATASET BUILDER SUMMARY  (date-range backfill mode)")
+    print("─" * 80)
+
+    if dataset_df.empty:
+        print("  (no ML dataset rows generated)")
+        print("─" * 80 + "\n")
+        return
+
+    label_col_count = sum(1 for c in dataset_df.columns if c in _LABEL_COLS)
+    feature_count   = len(dataset_df.columns) - label_col_count - 2
+
+    dates_with_data = dataset_df["date"].nunique() if "date" in dataset_df.columns else "N/A"
+    buy_count  = int((dataset_df.get("label_direction") == "BUY").sum())
+    sell_count = int((dataset_df.get("label_direction") == "SELL").sum())
+    hold_count = int((dataset_df.get("label_direction") == "HOLD").sum())
+    null_count = int(dataset_df.get("label_direction", pd.Series([])).isna().sum())
+
+    min_date = dataset_df["date"].min() if "date" in dataset_df.columns else "N/A"
+    max_date = dataset_df["date"].max() if "date" in dataset_df.columns else "N/A"
+
+    print(f"  Feature file : {features_path.name}")
+    print(f"  Date range   : {min_date} → {max_date}  ({dates_with_data} date(s) with data)")
+    ticker_count = dataset_df["ticker"].nunique() if "ticker" in dataset_df.columns else "N/A"
+    print(f"  Tickers      : {ticker_count}")
+    print(f"  Total rows   : {len(dataset_df)}")
+    print(f"  Features/row : {feature_count}")
+    print(f"  Label cols   : {label_col_count}")
+    print(
+        f"  Directions   : BUY={buy_count}  SELL={sell_count}  "
+        f"HOLD={hold_count}  NULL={null_count}"
+    )
+    if out_path:
+        print(f"  Saved        → {out_path.relative_to(_PROJECT_ROOT)}")
+    print("─" * 80 + "\n")
+
 
 def _print_summary(
     dataset_df,  # noqa: ANN001
@@ -168,16 +232,20 @@ def main() -> None:
     args = _parse_args()
     configure_logging(args.log_level)
 
-    date_tag      = args.date or datetime.now(UTC).strftime("%Y-%m-%d")
-    out_dir       = Path(args.output_dir) if args.output_dir else OUTPUT_DIR
-    features_path = FEATURES_DIR / f"feature_dataset_{date_tag}.csv"
+    out_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR
+
+    # ── Determine mode ────────────────────────────────────────────────────────
+    is_range_mode = args.feature_file is not None
+
+    if is_range_mode and args.date:
+        logger.error("--date cannot be combined with --feature-file")
+        sys.exit(1)
 
     logger.info("=" * 60)
     logger.info("financial-news-analytics | Phase 6: ML Dataset Builder")
     logger.info("=" * 60)
     logger.info(f"  Database     : {_safe_url(settings.database_url or '')}")
-    logger.info(f"  Feature date : {date_tag}")
-    logger.info(f"  Features file: {features_path.relative_to(_PROJECT_ROOT)}")
+    logger.info(f"  Mode         : {'date-range backfill' if is_range_mode else 'single-date'}")
     logger.info(f"  Output dir   : {out_dir.relative_to(_PROJECT_ROOT)}")
     logger.info(f"  Lookahead    : {args.lookahead_days} calendar days")
     logger.info(f"  Dry-run      : {args.dry_run}")
@@ -194,23 +262,62 @@ def main() -> None:
         )
         sys.exit(1)
 
-    from datetime import date  # noqa: PLC0415
-
-    try:
-        target_date = date.fromisoformat(date_tag)
-    except ValueError:
-        logger.error(f"Invalid date format: {date_tag!r}  (expected YYYY-MM-DD)")
-        sys.exit(1)
-
     builder = MLDatasetBuilder(database_url=settings.database_url)
 
     try:
-        dataset_df = builder.run(
-            features_path=features_path,
-            target_date=target_date,
-            output_dir=out_dir,
-            lookahead_days=args.lookahead_days,
-        )
+        if is_range_mode:
+            # ── Date-range backfill mode ──────────────────────────────────────
+            features_path = Path(args.feature_file)
+            logger.info(f"  Feature file : {features_path}")
+
+            dataset_df = builder.run_range(
+                features_path=features_path,
+                output_dir=out_dir,
+                lookahead_days=args.lookahead_days,
+            )
+
+            out_path: Path | None = None
+            if not dataset_df.empty and "date" in dataset_df.columns:
+                from datetime import date  # noqa: PLC0415
+
+                valid = dataset_df["date"].dropna()
+                if not valid.empty:
+                    min_d = min(valid)
+                    max_d = max(valid)
+                    fmt = "%Y-%m-%d"
+                    start_tag = min_d.strftime(fmt) if hasattr(min_d, "strftime") else str(min_d)
+                    end_tag   = max_d.strftime(fmt) if hasattr(max_d, "strftime") else str(max_d)
+                    date_tag  = start_tag if start_tag == end_tag else f"{start_tag}_{end_tag}"
+                    out_path  = out_dir / f"ml_dataset_{date_tag}.csv"
+
+            _print_range_summary(dataset_df, features_path, out_path)
+
+        else:
+            # ── Single-date mode (existing behaviour — unchanged) ─────────────
+            from datetime import date  # noqa: PLC0415
+
+            date_tag      = args.date or datetime.now(UTC).strftime("%Y-%m-%d")
+            features_path = FEATURES_DIR / f"feature_dataset_{date_tag}.csv"
+
+            logger.info(f"  Feature date : {date_tag}")
+            logger.info(f"  Features file: {features_path.relative_to(_PROJECT_ROOT)}")
+
+            try:
+                target_date = date.fromisoformat(date_tag)
+            except ValueError:
+                logger.error(f"Invalid date format: {date_tag!r}  (expected YYYY-MM-DD)")
+                sys.exit(1)
+
+            dataset_df = builder.run(
+                features_path=features_path,
+                target_date=target_date,
+                output_dir=out_dir,
+                lookahead_days=args.lookahead_days,
+            )
+
+            out_path = (out_dir / f"ml_dataset_{date_tag}.csv") if not dataset_df.empty else None
+            _print_summary(dataset_df, date_tag, out_path)
+
     except DataLoadError as exc:
         logger.error(f"Fatal: data load failed — {exc}")
         sys.exit(1)
@@ -219,9 +326,6 @@ def main() -> None:
         sys.exit(1)
     finally:
         builder.dispose()
-
-    out_path = (out_dir / f"ml_dataset_{date_tag}.csv") if not dataset_df.empty else None
-    _print_summary(dataset_df, date_tag, out_path)
 
 
 def _safe_url(url: str) -> str:

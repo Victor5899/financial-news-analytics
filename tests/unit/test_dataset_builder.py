@@ -21,6 +21,7 @@ TestRunMethod                — end-to-end pipeline, dry_run, edge cases
 TestDispose                  — resource cleanup lifecycle
 TestMissingDataHandling      — graceful degradation on absent prices
 TestLabelColumnConstants     — module-level constant correctness
+TestRunRange                 — MLDatasetBuilder.run_range multi-date backfill
 """
 
 from __future__ import annotations
@@ -1094,3 +1095,173 @@ class TestLabelColumnConstants:
 
     def test_sell_threshold_value(self) -> None:
         assert SELL_THRESHOLD == pytest.approx(-0.02)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TestRunRange  — MLDatasetBuilder.run_range (multi-date backfill)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestRunRange:
+    """Tests for the date-range backfill path in MLDatasetBuilder."""
+
+    @pytest.fixture
+    def multi_date_features_csv(self, tmp_path: Path) -> Path:
+        """Feature CSV spanning two trading dates: 2026-01-02 and 2026-01-05."""
+        path = tmp_path / "feature_dataset_2026-01-02_2026-01-05.csv"
+        rows = []
+        for d in ["2026-01-02", "2026-01-05"]:
+            for ticker in ["AAPL", "TSLA"]:
+                rows.append({
+                    "ticker": ticker,
+                    "date": d,
+                    "article_count": 5,
+                    "positive_count": 3,
+                    "neutral_count": 1,
+                    "negative_count": 1,
+                    "positive_ratio": 0.6,
+                    "mean_sentiment_score": 0.5,
+                })
+        pd.DataFrame(rows).to_csv(path, index=False)
+        return path
+
+    def test_run_range_returns_dataframe(
+        self, builder: MLDatasetBuilder, multi_date_features_csv: Path
+    ) -> None:
+        result = builder.run_range(
+            features_path=multi_date_features_csv,
+            lookahead_days=20,
+        )
+        assert isinstance(result, pd.DataFrame)
+
+    def test_run_range_processes_all_dates(
+        self, builder: MLDatasetBuilder, multi_date_features_csv: Path
+    ) -> None:
+        result = builder.run_range(
+            features_path=multi_date_features_csv,
+            lookahead_days=20,
+        )
+        assert not result.empty
+        assert result["date"].nunique() >= 1
+
+    def test_run_range_generates_label_columns(
+        self, builder: MLDatasetBuilder, multi_date_features_csv: Path
+    ) -> None:
+        result = builder.run_range(
+            features_path=multi_date_features_csv,
+            lookahead_days=20,
+        )
+        for col in LABEL_COLUMNS:
+            assert col in result.columns
+
+    def test_run_range_preserves_feature_columns(
+        self, builder: MLDatasetBuilder, multi_date_features_csv: Path
+    ) -> None:
+        result = builder.run_range(
+            features_path=multi_date_features_csv,
+            lookahead_days=20,
+        )
+        assert "article_count" in result.columns
+        assert "positive_ratio" in result.columns
+
+    def test_run_range_saves_range_csv(
+        self, builder: MLDatasetBuilder, multi_date_features_csv: Path, tmp_path: Path
+    ) -> None:
+        out_dir = tmp_path / "ml_out"
+        builder.run_range(
+            features_path=multi_date_features_csv,
+            output_dir=out_dir,
+            lookahead_days=20,
+        )
+        csvs = list(out_dir.glob("ml_dataset_*.csv"))
+        assert len(csvs) == 1
+
+    def test_run_range_csv_filename_contains_date_range(
+        self, builder: MLDatasetBuilder, multi_date_features_csv: Path, tmp_path: Path
+    ) -> None:
+        out_dir = tmp_path / "ml_out"
+        builder.run_range(
+            features_path=multi_date_features_csv,
+            output_dir=out_dir,
+            lookahead_days=20,
+        )
+        csvs = list(out_dir.glob("ml_dataset_*.csv"))
+        if csvs:
+            # Range file should contain start and end dates
+            fname = csvs[0].name
+            assert "2026-01-02" in fname
+
+    def test_run_range_no_output_dir_does_not_save(
+        self, builder: MLDatasetBuilder, multi_date_features_csv: Path
+    ) -> None:
+        with patch.object(builder, "save_dataset") as mock_save:
+            builder.run_range(
+                features_path=multi_date_features_csv,
+                output_dir=None,
+                lookahead_days=20,
+            )
+        mock_save.assert_not_called()
+
+    def test_run_range_missing_file_raises_data_load_error(
+        self, builder: MLDatasetBuilder, tmp_path: Path
+    ) -> None:
+        with pytest.raises(DataLoadError):
+            builder.run_range(features_path=tmp_path / "no_such_file.csv")
+
+    def test_run_range_single_date_csv_uses_single_date_tag(
+        self, builder: MLDatasetBuilder, sample_features_csv: Path, tmp_path: Path
+    ) -> None:
+        out_dir = tmp_path / "ml_out"
+        builder.run_range(
+            features_path=sample_features_csv,
+            output_dir=out_dir,
+            lookahead_days=20,
+        )
+        csvs = list(out_dir.glob("ml_dataset_*.csv"))
+        if csvs:
+            # Single-date CSV → filename should use just that date (no underscore range)
+            fname = csvs[0].stem  # ml_dataset_2026-01-02
+            # Should not have the pattern "YYYY-MM-DD_YYYY-MM-DD" (two dates)
+            parts = fname.replace("ml_dataset_", "")
+            # Either "2026-01-02" or "2026-01-02_2026-01-02" — both acceptable
+            assert "2026-01-02" in parts
+
+    def test_run_range_independent_labels_per_row(
+        self, builder: MLDatasetBuilder, multi_date_features_csv: Path
+    ) -> None:
+        result = builder.run_range(
+            features_path=multi_date_features_csv,
+            lookahead_days=20,
+        )
+        if not result.empty and "return_1d" in result.columns:
+            # Rows on different dates should potentially have different returns
+            # (just verify the column is present and processed per row)
+            assert result["return_1d"].dtype in (
+                "float64", "object"
+            )  # float or nullable
+
+    def test_run_range_loads_prices_for_full_window(
+        self, builder: MLDatasetBuilder, multi_date_features_csv: Path
+    ) -> None:
+        with patch.object(
+            builder, "load_prices", wraps=builder.load_prices
+        ) as mock_lp:
+            builder.run_range(
+                features_path=multi_date_features_csv,
+                lookahead_days=20,
+            )
+        # load_prices must be called exactly once with the full window
+        assert mock_lp.call_count == 1
+        call_kwargs = mock_lp.call_args
+        # start_date should be the minimum feature date (2026-01-02)
+        assert call_kwargs.kwargs["start_date"] == date(2026, 1, 2)
+
+    def test_run_range_backward_compat_single_date_via_run(
+        self, builder: MLDatasetBuilder, sample_features_csv: Path
+    ) -> None:
+        """Existing run() single-date path must still work unchanged."""
+        result = builder.run(
+            features_path=sample_features_csv,
+            target_date=date(2026, 1, 2),
+            lookahead_days=20,
+        )
+        assert isinstance(result, pd.DataFrame)

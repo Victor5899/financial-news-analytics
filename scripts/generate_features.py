@@ -17,6 +17,9 @@ Run from the project root
     # Specific date
     python scripts/generate_features.py --date 2026-06-16
 
+    # Historical backfill — date range (Phase 4 backfill mode)
+    python scripts/generate_features.py --start-date 2025-01-01 --end-date 2026-06-01
+
     # Custom output directory
     python scripts/generate_features.py --output-dir /tmp/features
 
@@ -28,7 +31,8 @@ Run from the project root
 
 Output
 ------
-  data/features/feature_dataset_<YYYY-MM-DD>.csv   one row per ticker
+  data/features/feature_dataset_<YYYY-MM-DD>.csv            single-date mode
+  data/features/feature_dataset_<start>_<end>.csv           date-range mode
 """
 
 from __future__ import annotations
@@ -74,8 +78,28 @@ def _parse_args() -> argparse.Namespace:
         "--date",
         default=None,
         metavar="YYYY-MM-DD",
-        help="Target date for feature generation (default: today)",
+        help=(
+            "Target date for feature generation (default: today). "
+            "Cannot be used with --start-date / --end-date."
+        ),
     )
+
+    # ── Date-range backfill (additive, mutually exclusive with --date) ────────
+    parser.add_argument(
+        "--start-date",
+        default=None,
+        metavar="YYYY-MM-DD",
+        dest="start_date",
+        help="Start of date range for historical backfill (requires --end-date)",
+    )
+    parser.add_argument(
+        "--end-date",
+        default=None,
+        metavar="YYYY-MM-DD",
+        dest="end_date",
+        help="End of date range for historical backfill (requires --start-date)",
+    )
+
     parser.add_argument(
         "--output-dir",
         default=None,
@@ -141,6 +165,35 @@ def _print_summary(features_df, date_tag: str) -> None:  # noqa: ANN001
     print("─" * 80 + "\n")
 
 
+def _print_range_summary(features_df, start_tag: str, end_tag: str) -> None:  # noqa: ANN001
+    print("\n" + "─" * 80)
+    print("  FEATURE GENERATION SUMMARY  (date-range backfill mode)")
+    print("─" * 80)
+
+    if features_df.empty:
+        print("  (no features generated)")
+        print("─" * 80 + "\n")
+        return
+
+    dates_with_data = features_df["date"].nunique() if "date" in features_df.columns else 0
+    tickers_found   = features_df["ticker"].nunique() if "ticker" in features_df.columns else 0
+    total_rows      = len(features_df)
+    total_articles = (
+        int(features_df["article_count"].sum())
+        if "article_count" in features_df.columns else 0
+    )
+
+    print(f"  Date range   : {start_tag} → {end_tag}")
+    print(f"  Dates with data: {dates_with_data}")
+    print(f"  Unique tickers : {tickers_found}")
+    print(f"  Feature rows   : {total_rows}")
+    print(f"  Total articles : {total_articles}")
+    if not features_df.empty:
+        feat_count = len(features_df.columns) - 2
+        print(f"  Features / row : {feat_count}")
+    print("─" * 80 + "\n")
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -155,15 +208,27 @@ def main() -> None:
         )
         sys.exit(1)
 
-    tickers  = [t.upper() for t in args.tickers] if args.tickers else None
-    date_tag = args.date or datetime.now(UTC).strftime("%Y-%m-%d")
-    out_dir  = Path(args.output_dir) if args.output_dir else OUTPUT_DIR
+    tickers = [t.upper() for t in args.tickers] if args.tickers else None
+    out_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR
+
+    # ── Determine mode (single-date vs date-range) ────────────────────────────
+    is_range_mode = args.start_date is not None or args.end_date is not None
+
+    if is_range_mode:
+        if args.date:
+            logger.error("--date cannot be combined with --start-date / --end-date")
+            sys.exit(1)
+        if not (args.start_date and args.end_date):
+            logger.error(
+                "Both --start-date and --end-date are required for date-range backfill"
+            )
+            sys.exit(1)
 
     logger.info("=" * 60)
     logger.info("financial-news-analytics | Phase 4: Feature Engineering")
     logger.info("=" * 60)
     logger.info(f"  Database     : {_safe_url(settings.database_url)}")
-    logger.info(f"  Target date  : {date_tag}")
+    logger.info(f"  Mode         : {'date-range backfill' if is_range_mode else 'single-date'}")
     logger.info(f"  Tickers      : {tickers or 'all (auto-discover)'}")
     logger.info(f"  Lookback     : {args.lookback_days} days")
     logger.info(f"  Output dir   : {out_dir.relative_to(_PROJECT_ROOT)}")
@@ -174,21 +239,56 @@ def main() -> None:
 
     from datetime import date  # noqa: PLC0415
 
-    try:
-        target_date = date.fromisoformat(date_tag)
-    except ValueError:
-        logger.error(f"Invalid date format: {date_tag!r}  (expected YYYY-MM-DD)")
-        sys.exit(1)
-
     eng = FeatureEngineer(database_url=settings.database_url)
 
     try:
-        features_df = eng.run(
-            tickers=tickers,
-            target_date=target_date,
-            output_dir=out_dir,
-            lookback_days=args.lookback_days,
-        )
+        if is_range_mode:
+            # ── Date-range backfill mode ──────────────────────────────────────
+            try:
+                start_date = date.fromisoformat(args.start_date)
+                end_date   = date.fromisoformat(args.end_date)
+            except ValueError as exc:
+                logger.error(f"Invalid date format: {exc}  (expected YYYY-MM-DD)")
+                sys.exit(1)
+
+            if start_date > end_date:
+                logger.error(
+                    f"--start-date ({args.start_date}) must not be after "
+                    f"--end-date ({args.end_date})"
+                )
+                sys.exit(1)
+
+            logger.info(f"  Start date   : {start_date}")
+            logger.info(f"  End date     : {end_date}")
+
+            features_df = eng.run_range(
+                tickers=tickers,
+                start_date=start_date,
+                end_date=end_date,
+                output_dir=out_dir,
+                lookback_days=args.lookback_days,
+            )
+            _print_range_summary(features_df, args.start_date, args.end_date)
+
+        else:
+            # ── Single-date mode (existing behaviour — unchanged) ─────────────
+            date_tag = args.date or datetime.now(UTC).strftime("%Y-%m-%d")
+            logger.info(f"  Target date  : {date_tag}")
+
+            try:
+                target_date = date.fromisoformat(date_tag)
+            except ValueError:
+                logger.error(f"Invalid date format: {date_tag!r}  (expected YYYY-MM-DD)")
+                sys.exit(1)
+
+            features_df = eng.run(
+                tickers=tickers,
+                target_date=target_date,
+                output_dir=out_dir,
+                lookback_days=args.lookback_days,
+            )
+            _print_summary(features_df, date_tag)
+
     except DataLoadError as exc:
         logger.error(f"Fatal: database load failed — {exc}")
         sys.exit(1)
@@ -197,8 +297,6 @@ def main() -> None:
         sys.exit(1)
     finally:
         eng.dispose()
-
-    _print_summary(features_df, date_tag)
 
 
 def _safe_url(url: str) -> str:

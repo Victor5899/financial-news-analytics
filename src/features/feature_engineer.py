@@ -558,6 +558,113 @@ class FeatureEngineer:
         )
         return out_path
 
+    def run_range(
+        self,
+        start_date: date,
+        end_date: date,
+        tickers: list[str] | None = None,
+        output_dir: Path | None = None,
+        lookback_days: int = 7,
+    ) -> pd.DataFrame:
+        """
+        Generate features for every calendar date in ``[start_date, end_date]``.
+
+        Loads article + sentiment data in a **single** database query covering
+        ``[start_date - lookback_days, end_date]``, then iterates over dates
+        one at a time and applies the standard feature-generation logic for
+        each.  Dates that have no articles on the target day are silently
+        skipped (rolling / time features for adjacent dates are unaffected
+        because the full window is already in memory).
+
+        Parameters
+        ----------
+        start_date : date
+            First date to generate features for (inclusive).
+        end_date : date
+            Last date to generate features for (inclusive).
+        tickers : list[str] | None
+            Tickers to process.  ``None`` processes all available tickers.
+        output_dir : Path | None
+            When provided the combined DataFrame is saved to
+            ``<output_dir>/feature_dataset_<start>_<end>.csv``.
+        lookback_days : int
+            History window for rolling features.  Default: ``7``.
+
+        Returns
+        -------
+        pd.DataFrame
+            All feature rows for all processed dates, sorted by ``date`` then
+            ``ticker``.  Returns an empty DataFrame (with correct columns)
+            when no data is found.
+
+        Raises
+        ------
+        ValueError
+            If ``start_date`` is after ``end_date``.
+        DataLoadError
+            On database connectivity failure.
+        """
+        if start_date > end_date:
+            raise ValueError(
+                f"start_date ({start_date}) must not be after end_date ({end_date})"
+            )
+
+        total_lookback = (end_date - start_date).days + lookback_days
+
+        logger.info(
+            f"run_range: {start_date} → {end_date}  "
+            f"({(end_date - start_date).days + 1} calendar days)  "
+            f"lookback={lookback_days}d"
+        )
+
+        raw_df = self.load_data(
+            tickers=tickers,
+            target_date=end_date,
+            lookback_days=total_lookback,
+        )
+
+        if raw_df.empty:
+            logger.warning(
+                "run_range: no articles found for the requested range — "
+                "returning empty feature DataFrame."
+            )
+            return pd.DataFrame(columns=FEATURE_COLUMNS)
+
+        all_frames: list[pd.DataFrame] = []
+        dates_processed = 0
+        dates_skipped = 0
+
+        current = start_date
+        while current <= end_date:
+            try:
+                features_df = self.generate_features(raw_df, current)
+                all_frames.append(features_df)
+                dates_processed += 1
+            except FeatureGenerationError:
+                logger.debug(
+                    f"run_range: no same-day articles on {current} — skipping"
+                )
+                dates_skipped += 1
+            current += timedelta(days=1)
+
+        logger.info(
+            f"run_range complete: {dates_processed} dates with features, "
+            f"{dates_skipped} dates skipped (no articles)"
+        )
+
+        if not all_frames:
+            return pd.DataFrame(columns=FEATURE_COLUMNS)
+
+        combined = pd.concat(all_frames, ignore_index=True)
+
+        if output_dir is not None:
+            start_tag = start_date.strftime("%Y-%m-%d")
+            end_tag   = end_date.strftime("%Y-%m-%d")
+            date_tag  = f"{start_tag}_{end_tag}"
+            self.save_features(combined, output_dir, date_tag)
+
+        return combined
+
     def run(
         self,
         tickers: list[str] | None = None,

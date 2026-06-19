@@ -32,8 +32,6 @@ import pandas as pd
 import pytest
 import requests
 
-UTC = timezone.utc
-
 from src.ingestion.news_client import (
     ARTICLE_COLUMNS,
     FinnhubAuthError,
@@ -42,10 +40,39 @@ from src.ingestion.news_client import (
     FinnhubRequestError,
     _check_response_errors,
     _parse_article,
-    fetch_articles,
     fetch_all_tickers,
+    fetch_articles,
     summarise_results,
 )
+
+UTC = timezone.utc
+
+# ── Test constants ────────────────────────────────────────────────────────────
+
+# Sentinel API key used throughout this test module.  It is intentionally
+# different from any real key so that if the patch below is accidentally
+# bypassed the assertion will still fail clearly rather than hitting Finnhub.
+_TEST_FINNHUB_KEY = "test_finnhub_key_32chars_xxxxxxxx"
+
+
+# ── Module-level settings patch ───────────────────────────────────────────────
+#
+# Root-cause: src.utils.config.settings is a Pydantic singleton created at
+# *import time* from the project's .env file.  news_client.fetch_articles()
+# reads settings.finnhub_api_key at *call time*, so any real key present in
+# .env leaks straight into the request params.
+#
+# Fix: replace the `settings` name inside the news_client module's namespace
+# for every test in this file.  monkeypatch ensures the original is restored
+# after each test, so no other test module is affected.
+
+@pytest.fixture(autouse=True)
+def _patch_news_client_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_cfg = MagicMock()
+    mock_cfg.finnhub_api_key  = _TEST_FINNHUB_KEY
+    mock_cfg.news_lookback_days = 7  # used by fetch_articles for default from_date
+    monkeypatch.setattr("src.ingestion.news_client.settings", mock_cfg)
+
 
 # ── Shared test data ──────────────────────────────────────────────────────────
 
@@ -304,7 +331,7 @@ class TestFetchArticles:
         session = self._mock_session([_make_raw_article()])
         fetch_articles("AAPL", session=session)
         params = session.get.call_args[1]["params"]
-        assert params["token"] == "test_finnhub_key_32chars_xxxxxxxx"
+        assert params["token"] == _TEST_FINNHUB_KEY
 
     def test_date_params_are_formatted_as_yyyy_mm_dd(self):
         session = self._mock_session([_make_raw_article()])
