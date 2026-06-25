@@ -32,6 +32,7 @@ Output
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,6 +103,16 @@ def _parse_args() -> argparse.Namespace:
         help="Logging verbosity",
     )
     parser.add_argument(
+        "--input-file",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Process a single CSV file directly (Finnhub or GDELT). "
+            "Ticker and output tag are inferred from the filename. "
+            "Skips date-based discovery when provided."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print resolved configuration and exit without running inference",
@@ -143,6 +154,42 @@ def _find_input_files(
             "Run scripts/fetch_news.py first."
         )
     return discovered
+
+
+# ── Filename parsing ──────────────────────────────────────────────────────────
+
+_GDELT_RE   = re.compile(r"^([A-Z]+)_gdelt_(\d{4})-\d{2}-\d{2}_\d{4}-\d{2}-\d{2}$")
+_FINNHUB_RE = re.compile(r"^([A-Z]+)_news_(\d{4}-\d{2}-\d{2})$")
+
+
+def _parse_input_filename(path: Path) -> tuple[str, str]:
+    """Return ``(ticker, output_tag)`` inferred from *path*'s filename stem.
+
+    Supported patterns
+    ------------------
+    Finnhub : ``<TICKER>_news_<YYYY-MM-DD>.csv``    → output_tag = ``YYYY-MM-DD``
+    GDELT   : ``<TICKER>_gdelt_<START>_<END>.csv``  → output_tag = start year (``YYYY``)
+
+    Raises
+    ------
+    ValueError
+        When the filename does not match either expected pattern.
+    """
+    stem = path.stem
+
+    m = _GDELT_RE.match(stem)
+    if m:
+        return m.group(1), m.group(2)  # ticker, start-year
+
+    m = _FINNHUB_RE.match(stem)
+    if m:
+        return m.group(1), m.group(2)  # ticker, date-tag
+
+    raise ValueError(
+        f"Cannot infer ticker from '{path.name}'. "
+        "Expected '<TICKER>_news_<YYYY-MM-DD>.csv' or "
+        "'<TICKER>_gdelt_<YYYY-MM-DD>_<YYYY-MM-DD>.csv'."
+    )
 
 
 # ── Output helpers ────────────────────────────────────────────────────────────
@@ -214,27 +261,49 @@ def main() -> None:
     args = _parse_args()
     configure_logging(args.log_level)
 
-    tickers  = [t.upper() for t in args.tickers] if args.tickers else None
-    date_tag = args.date or datetime.now(UTC).strftime("%Y-%m-%d")
-
     logger.info("=" * 60)
     logger.info("financial-news-analytics | Phase 2: Sentiment Analysis")
     logger.info("=" * 60)
     logger.info(f"  Model      : {args.model}")
     logger.info(f"  Batch size : {args.batch_size}")
     logger.info(f"  Device     : {args.device}")
-    logger.info(f"  Date tag   : {date_tag}")
     logger.info(f"  Input dir  : {INPUT_DIR.relative_to(_PROJECT_ROOT)}")
     logger.info(f"  Output dir : {OUTPUT_DIR.relative_to(_PROJECT_ROOT)}")
 
-    if args.dry_run:
-        logger.info("Dry-run mode — exiting without running inference.")
-        sys.exit(0)
+    if args.input_file:
+        # ── Single-file mode (Finnhub or GDELT backfill) ──────────────────────
+        input_path = Path(args.input_file).resolve()
+        if not input_path.exists():
+            logger.error(f"Input file not found: {input_path}")
+            sys.exit(1)
+        try:
+            ticker, output_tag = _parse_input_filename(input_path)
+        except ValueError as exc:
+            logger.error(str(exc))
+            sys.exit(1)
+        input_files: list[tuple[str, Path]] = [(ticker, input_path)]
+        logger.info(f"  Input file : {input_path.name}")
+        logger.info(f"  Ticker     : {ticker}")
+        logger.info(f"  Output tag : {output_tag}")
 
-    input_files = _find_input_files(tickers, date_tag)
-    if not input_files:
-        logger.error("No input files to process — exiting.")
-        sys.exit(1)
+        if args.dry_run:
+            logger.info("Dry-run mode — exiting without running inference.")
+            sys.exit(0)
+    else:
+        # ── Date-based discovery mode (original Finnhub behaviour) ────────────
+        tickers  = [t.upper() for t in args.tickers] if args.tickers else None
+        date_tag = args.date or datetime.now(UTC).strftime("%Y-%m-%d")
+        output_tag = date_tag
+        logger.info(f"  Date tag   : {date_tag}")
+
+        if args.dry_run:
+            logger.info("Dry-run mode — exiting without running inference.")
+            sys.exit(0)
+
+        input_files = _find_input_files(tickers, date_tag)
+        if not input_files:
+            logger.error("No input files to process — exiting.")
+            sys.exit(1)
 
     logger.info(f"Found {len(input_files)} input file(s) to process")
 
@@ -274,10 +343,10 @@ def main() -> None:
             continue
 
         results[ticker] = enriched
-        _save_enriched(ticker, enriched, date_tag)
+        _save_enriched(ticker, enriched, output_tag)
 
     _print_summary(results)
-    _save_summary(results, date_tag)
+    _save_summary(results, output_tag)
 
 
 if __name__ == "__main__":

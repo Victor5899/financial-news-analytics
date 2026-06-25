@@ -1,22 +1,84 @@
 # financial-news-analytics
 
-Real-time financial news sentiment analytics and stock movement prediction pipeline.
+An end-to-end financial news analytics and stock movement prediction pipeline that combines real-time and historical news ingestion, FinBERT sentiment analysis, PostgreSQL storage, feature engineering, stock price ingestion, and ML dataset generation — supporting both live inference and large historical backfills.
 
 ---
 
 ## Project Overview
 
-This project ingests financial news articles via [Finnhub](https://finnhub.io), enriches them with FinBERT sentiment scores, and lays the groundwork for downstream stock movement prediction.
+This project builds a complete supervised machine-learning pipeline for predicting stock price movements from financial news sentiment.
 
-| Phase   | Status      | Description                                                         |
-| ------- | ----------- | ------------------------------------------------------------------- |
-| Phase 1 | ✅ Complete | Finnhub news ingestion → `data/raw/`                                |
-| Phase 2 | ✅ Complete | FinBERT sentiment analysis → `data/processed/`                      |
-| Phase 3 | ✅ Complete | PostgreSQL storage → `news_articles` + `sentiment_results`          |
-| Phase 4 | ✅ Complete | Feature engineering → `data/features/`                              |
-| Phase 5 | ✅ Complete | Stock price ingestion (Yahoo Finance / yfinance) → `stock_prices`   |
-| Phase 6 | ✅ Complete | ML dataset builder — feature + label generation → `data/ml/`        |
-| Phase 7 | 🔜 Planned  | ML training — XGBoost stock movement prediction                     |
+**News ingestion** uses two complementary sources:
+
+- **[Finnhub](https://finnhub.io)** provides recent, real-time financial news for daily inference.
+- **[GDELT](https://www.gdeltproject.org/)** provides large historical news archives for multi-year backfills, enabling rich ML training datasets that the Finnhub free tier alone cannot supply.
+
+Both sources are normalised into the same schema and feed into the same downstream pipeline:
+
+1. **FinBERT** (`ProsusAI/finbert`) classifies each article as `positive`, `neutral`, or `negative`.
+2. **PostgreSQL** stores all structured data — articles, sentiment results, and stock prices.
+3. **Feature Engineering** aggregates per-ticker, per-day sentiment signals into a 22-column feature vector.
+4. **Yahoo Finance** (`yfinance`) supplies historical OHLCV stock prices.
+5. **ML Dataset Builder** joins features with forward-looking price labels to produce an XGBoost-ready supervised dataset.
+6. **Phase 7** will train and evaluate an XGBoost classifier for BUY / HOLD / SELL prediction.
+
+| Phase   | Status        | Description                                                              |
+| ------- | ------------- | ------------------------------------------------------------------------ |
+| Phase 1 | ✅ Complete   | News ingestion (Finnhub real-time + GDELT historical) → `data/raw/`      |
+| Phase 2 | ✅ Complete   | FinBERT sentiment analysis → `data/processed/`                           |
+| Phase 3 | ✅ Complete   | PostgreSQL storage → `news_articles` + `sentiment_results`               |
+| Phase 4 | ✅ Complete   | Feature engineering → `data/features/`                                   |
+| Phase 5 | ✅ Complete   | Stock price ingestion (Yahoo Finance / yfinance) → `stock_prices`        |
+| Phase 6 | ✅ Complete   | ML dataset builder — feature + label generation → `data/ml/`             |
+| Phase 7 | 🚧 Upcoming   | ML training — XGBoost stock movement prediction                          |
+
+---
+
+## Data Sources
+
+| Source           | Purpose                             |
+| ---------------- | ----------------------------------- |
+| **Finnhub**      | Real-time financial news ingestion  |
+| **GDELT**        | Historical financial news backfill  |
+| **Yahoo Finance**| Historical OHLCV stock prices       |
+| **FinBERT**      | Financial sentiment classification  |
+| **PostgreSQL**   | Persistent structured storage       |
+
+---
+
+## Key Features
+
+- Real-time financial news ingestion via Finnhub
+- Historical news backfill via GDELT (multi-year archives)
+- FinBERT sentiment analysis (`positive` / `neutral` / `negative`)
+- PostgreSQL storage with safe upsert semantics
+- Historical OHLCV stock price ingestion via Yahoo Finance
+- Per-ticker daily feature engineering (22 sentiment + rolling features)
+- Historical date-range feature generation for large backfills
+- Supervised ML dataset generation with 13 label columns
+- XGBoost-ready output with BUY / HOLD / SELL classification targets
+- Structured logging throughout every phase
+- Comprehensive unit test suite (650+ tests, no external dependencies required)
+
+---
+
+## Current Dataset Statistics
+
+The following statistics reflect the current historical dataset generated from Jan 2025 to Jun 2026.
+
+| Metric                   | Value     |
+| ------------------------ | --------- |
+| News articles            | 41,456    |
+| Sentiment records        | 41,456    |
+| Stock price records      | 1,825     |
+| Tickers tracked          | 5         |
+| Feature rows             | 579       |
+| Feature columns          | 22        |
+| ML dataset rows          | 488       |
+| Label columns            | 13        |
+| Prediction classes       | BUY / HOLD / SELL |
+
+The ML dataset builder generated **488 labelled samples** from **579 engineered feature rows**, with the remainder dropped due to insufficient forward price data at the end of the date range.
 
 ---
 
@@ -25,7 +87,8 @@ This project ingests financial news articles via [Finnhub](https://finnhub.io), 
 ```
 financial-news-analytics/
 ├── scripts/
-│   ├── fetch_news.py          # Phase 1: fetch news from Finnhub
+│   ├── fetch_news.py          # Phase 1: fetch real-time news from Finnhub
+│   ├── fetch_gdelt_news.py    # Phase 1: fetch historical news from GDELT
 │   ├── run_sentiment.py       # Phase 2: run FinBERT sentiment analysis
 │   ├── load_to_db.py          # Phase 3: load processed CSVs into PostgreSQL
 │   ├── generate_features.py   # Phase 4: generate ML feature dataset
@@ -34,7 +97,8 @@ financial-news-analytics/
 │
 ├── src/
 │   ├── ingestion/
-│   │   └── news_client.py     # Finnhub API client
+│   │   ├── news_client.py     # Finnhub API client (real-time)
+│   │   └── gdelt_client.py    # GDELT API client (historical backfill)
 │   ├── processing/
 │   │   └── sentiment_analyzer.py  # FinBERT sentiment pipeline
 │   ├── storage/
@@ -42,7 +106,7 @@ financial-news-analytics/
 │   │   ├── models.py          # SQLAlchemy ORM models (incl. StockPrice)
 │   │   └── repository.py      # Upsert, bulk insert, queries
 │   ├── features/
-│   │   └── feature_engineer.py    # Phase 4: feature computation
+│   │   └── feature_engineer.py    # Phase 4: feature computation + range backfill
 │   ├── prices/
 │   │   ├── price_client.py    # Phase 5: Yahoo Finance / yfinance client
 │   │   └── price_repository.py    # Phase 5: stock_prices DB access layer
@@ -57,7 +121,9 @@ financial-news-analytics/
 │   ├── conftest.py            # Shared fixtures (settings mock)
 │   └── unit/
 │       ├── test_news_client.py
+│       ├── test_gdelt_client.py       # GDELT client unit tests
 │       ├── test_sentiment_analyzer.py
+│       ├── test_run_sentiment.py      # Phase 2 script tests (incl. --input-file)
 │       ├── test_repository.py         # Phase 3: SQLite in-memory tests
 │       ├── test_feature_engineer.py   # Phase 4: 80 unit tests
 │       ├── test_price_client.py       # Phase 5: 62 unit tests (yfinance mocked)
@@ -65,7 +131,8 @@ financial-news-analytics/
 │       └── test_dataset_builder.py    # Phase 6: 113 unit tests (SQLite in-memory)
 │
 ├── data/
-│   ├── raw/                   # Phase 1 output (gitignored)
+│   ├── raw/                   # Phase 1 output: Finnhub + GDELT CSVs (gitignored)
+│   │   └── gdelt/             # GDELT backfill output (gitignored)
 │   ├── processed/             # Phase 2 output (gitignored)
 │   ├── features/              # Phase 4 output (gitignored)
 │   └── ml/                    # Phase 6 output (gitignored)
@@ -99,6 +166,8 @@ cp .env.example .env
 
 ### 3. Run Phase 1 — Fetch news
 
+**Option A: Finnhub (real-time, last N days)**
+
 ```bash
 python scripts/fetch_news.py
 ```
@@ -114,25 +183,50 @@ Options:
 
 Output: `data/raw/<TICKER>_news_<YYYY-MM-DD>.csv` + `data/raw/summary_<YYYY-MM-DD>.csv`
 
+**Option B: GDELT (historical backfill)**
+
+```bash
+# Backfill a full year for all tickers
+python scripts/fetch_gdelt_news.py --start-date 2025-01-01 --end-date 2025-12-31
+
+# Specific tickers and date range
+python scripts/fetch_gdelt_news.py --tickers AAPL TSLA NVDA \
+    --start-date 2025-01-01 --end-date 2025-06-30
+```
+
+Output: `data/raw/gdelt/<TICKER>_gdelt_<START>_<END>.csv`
+
 ### 4. Run Phase 2 — Sentiment analysis
+
+**Finnhub files (date-based discovery):**
 
 ```bash
 python scripts/run_sentiment.py
+python scripts/run_sentiment.py --date 2026-06-15
 ```
+
+**GDELT backfill files (direct file mode):**
+
+```bash
+python scripts/run_sentiment.py --input-file data/raw/gdelt/NVDA_gdelt_2025-01-01_2025-12-31.csv
+```
+
+The `--input-file` flag processes any single CSV directly — ticker and output tag are inferred from the filename. For GDELT files the output tag is the start year (e.g. `NVDA_sentiment_2025.csv`).
 
 Options:
 
-| Flag                       | Default            | Description                     |
-| -------------------------- | ------------------ | ------------------------------- |
-| `--tickers AAPL TSLA`      | all CSVs for today | Tickers to process              |
-| `--date 2026-06-15`        | today              | Date tag of input CSVs          |
-| `--model ProsusAI/finbert` | from `.env`        | Hugging Face model ID           |
-| `--batch-size 32`          | from `.env`        | Inference batch size            |
-| `--device auto`            | from `.env`        | `auto` / `cpu` / `cuda` / `mps` |
-| `--log-level INFO`         | from `.env`        | Verbosity                       |
-| `--dry-run`                | —                  | Print config and exit           |
+| Flag                       | Default            | Description                                         |
+| -------------------------- | ------------------ | --------------------------------------------------- |
+| `--tickers AAPL TSLA`      | all CSVs for today | Tickers to process (discovery mode)                 |
+| `--date 2026-06-15`        | today              | Date tag of input CSVs (discovery mode)             |
+| `--input-file PATH`        | —                  | Process a single CSV directly (skips discovery)     |
+| `--model ProsusAI/finbert` | from `.env`        | Hugging Face model ID                               |
+| `--batch-size 32`          | from `.env`        | Inference batch size                                |
+| `--device auto`            | from `.env`        | `auto` / `cpu` / `cuda` / `mps`                     |
+| `--log-level INFO`         | from `.env`        | Verbosity                                           |
+| `--dry-run`                | —                  | Print config and exit                               |
 
-Output: `data/processed/<TICKER>_sentiment_<YYYY-MM-DD>.csv` + `data/processed/sentiment_summary_<YYYY-MM-DD>.csv`
+Output: `data/processed/<TICKER>_sentiment_<tag>.csv` + `data/processed/sentiment_summary_<tag>.csv`
 
 ### 5. Run Phase 3 — Load to PostgreSQL
 
@@ -156,21 +250,27 @@ Output: rows upserted into `news_articles` and `sentiment_results` tables.
 ### 6. Run Phase 4 — Feature engineering
 
 ```bash
+# Single day
 python scripts/generate_features.py --date 2026-06-16
+
+# Historical date-range backfill
+python scripts/generate_features.py --start-date 2025-01-01 --end-date 2025-12-31
 ```
 
 Options:
 
-| Flag                  | Default           | Description                         |
-| --------------------- | ----------------- | ----------------------------------- |
-| `--tickers AAPL TSLA` | all tickers in DB | Tickers to generate features for    |
-| `--date 2026-06-16`   | today             | Target date                         |
-| `--output-dir PATH`   | `data/features/`  | Directory for output CSV            |
-| `--lookback-days 7`   | `7`               | History window for rolling features |
-| `--log-level INFO`    | from `.env`       | Verbosity                           |
-| `--dry-run`           | —                 | Print config and exit               |
+| Flag                  | Default           | Description                                      |
+| --------------------- | ----------------- | ------------------------------------------------ |
+| `--tickers AAPL TSLA` | all tickers in DB | Tickers to generate features for                 |
+| `--date 2026-06-16`   | today             | Target date (single-day mode)                    |
+| `--start-date`        | —                 | Start of date range (range mode)                 |
+| `--end-date`          | —                 | End of date range (range mode)                   |
+| `--output-dir PATH`   | `data/features/`  | Directory for output CSV                         |
+| `--lookback-days 7`   | `7`               | History window for rolling features              |
+| `--log-level INFO`    | from `.env`       | Verbosity                                        |
+| `--dry-run`           | —                 | Print config and exit                            |
 
-Output: `data/features/feature_dataset_<YYYY-MM-DD>.csv`
+Output: `data/features/feature_dataset_<YYYY-MM-DD>.csv` (single day) or `data/features/feature_dataset_<START>_<END>.csv` (range)
 
 ### 7. Run Phase 5 — Stock price ingestion
 
@@ -208,24 +308,42 @@ Output: rows upserted into the `stock_prices` table.
 
 ---
 
+## Historical News Backfill (GDELT)
+
+The Finnhub free tier limits lookback to approximately one year and caps daily request volume. For meaningful ML training, the model needs multiple years of labelled examples per ticker — far more than Finnhub alone can supply.
+
+**GDELT** (Global Database of Events, Language, and Tone) is a free, open, real-time database of global news events. Its news-article index covers hundreds of thousands of financial news sources and extends back many years, making it ideal for building large historical training corpora.
+
+The GDELT integration (`src/ingestion/gdelt_client.py`) enables:
+
+- **Multi-year historical backfills** — fetch news for any date range, from months to years
+- **Scalable ingestion** — rate-limited, batched requests with automatic retry
+- **Identical downstream processing** — GDELT output uses the exact same column schema as Finnhub, so the same FinBERT pipeline, database loader, and feature engineer all work unchanged
+- **Larger ML datasets** — more training samples lead to better generalisation and more reliable evaluation
+- **Reproducible experiments** — fixed date ranges produce fully deterministic datasets
+
+Both Finnhub and GDELT files feed into the same Phase 2 → 3 → 4 → 5 → 6 pipeline without any modification to the downstream code.
+
+---
+
 ## Data Schemas
 
-### Phase 1 — Raw news (`data/raw/<TICKER>_news_<date>.csv`)
+### Phase 1 — Raw news (`data/raw/<TICKER>_news_<date>.csv` or `data/raw/gdelt/<TICKER>_gdelt_<START>_<END>.csv`)
 
-| Column         | Type           | Description             |
-| -------------- | -------------- | ----------------------- |
-| `ticker`       | str            | Ticker symbol           |
-| `source_id`    | str            | Finnhub article ID      |
-| `source_name`  | str            | Publisher name          |
-| `author`       | null           | Not provided by Finnhub |
-| `title`        | str            | Article headline        |
-| `description`  | str            | Article summary         |
-| `url`          | str            | Article URL             |
-| `published_at` | datetime (UTC) | Publication timestamp   |
-| `content`      | null           | Not provided by Finnhub |
-| `fetched_at`   | datetime (UTC) | Fetch timestamp         |
+| Column         | Type           | Description                       |
+| -------------- | -------------- | --------------------------------- |
+| `ticker`       | str            | Ticker symbol                     |
+| `source_id`    | str            | Article ID (Finnhub) or hash (GDELT) |
+| `source_name`  | str            | Publisher name                    |
+| `author`       | null           | Not provided by either source     |
+| `title`        | str            | Article headline                  |
+| `description`  | str            | Article summary                   |
+| `url`          | str            | Article URL                       |
+| `published_at` | datetime (UTC) | Publication timestamp             |
+| `content`      | null           | Not provided by either source     |
+| `fetched_at`   | datetime (UTC) | Fetch timestamp                   |
 
-### Phase 2 — Sentiment-enriched (`data/processed/<TICKER>_sentiment_<date>.csv`)
+### Phase 2 — Sentiment-enriched (`data/processed/<TICKER>_sentiment_<tag>.csv`)
 
 All Phase 1 columns plus:
 
@@ -391,27 +509,33 @@ Re-running `fetch_prices.py` is always safe — `ON CONFLICT DO UPDATE` refreshe
 ## Full Pipeline Diagram
 
 ```
-Finnhub API                    Yahoo Finance (yfinance)
-     │                                  │
-     │  Phase 1: fetch_news.py          │  Phase 5: fetch_prices.py
-     ▼                                  ▼
-data/raw/<TICKER>_news_<date>.csv    stock_prices  (PostgreSQL)
-     │
-     │  Phase 2: run_sentiment.py
-     ▼
-data/processed/<TICKER>_sentiment_<date>.csv
-     │
-     │  Phase 3: load_to_db.py
-     ▼
-news_articles + sentiment_results  (PostgreSQL)
-     │
-     │  Phase 4: generate_features.py
-     ▼
-data/features/feature_dataset_<date>.csv
-     │
-     │  Phase 6 (planned): ML training
-     ▼
-  XGBoost model
+Finnhub API ──────────────────\
+(real-time, Phase 1)           \
+                                ├──► Phase 2: run_sentiment.py (FinBERT)
+GDELT ─────────────────────────/         │
+(historical backfill, Phase 1)           │
+                                         ▼
+                              data/processed/<TICKER>_sentiment_<tag>.csv
+                                         │
+                                         │  Phase 3: load_to_db.py
+                                         ▼
+                              news_articles + sentiment_results  (PostgreSQL)
+                                         │
+                                         │  Phase 4: generate_features.py
+                                         ▼
+                              data/features/feature_dataset_<date>.csv
+                                         │
+Yahoo Finance ───────────────────────────┤  Phase 5: fetch_prices.py
+(OHLCV prices)                           │         ▼
+                                         │    stock_prices  (PostgreSQL)
+                                         │         │
+                                         │  Phase 6: build_ml_dataset.py
+                                         ▼
+                              data/ml/ml_dataset_<date>.csv
+                                         │
+                                         │  Phase 7 (upcoming): XGBoost training
+                                         ▼
+                                   BUY / HOLD / SELL  prediction
 ```
 
 ---
@@ -439,6 +563,8 @@ PostgreSQL
           ▼
   data/features/feature_dataset_<date>.csv
 ```
+
+**Historical backfill:** `generate_features.py` also supports a `--start-date` / `--end-date` range mode that iterates over every date in the window, producing a single combined CSV covering the full period. This makes it practical to generate months or years of training features from a historical GDELT backfill in a single command.
 
 #### Exception hierarchy
 
@@ -511,6 +637,8 @@ TSLA,2026-06-16,183,42,91,50,0.229508,0.497268,0.273224,-0.043716,0.803214,-1,1,
 ## Phase 6 — ML Dataset Builder
 
 Phase 6 assembles the **supervised training dataset** that Phase 7 (XGBoost) consumes.  It joins the Phase 4 feature vectors with future stock price movements drawn from `stock_prices` to produce binary and multi-class labels for every (ticker, date) pair.
+
+The builder supports both single-date and historical range modes. Running against the full historical feature dataset (579 rows spanning Jan 2025 – Jun 2026) produced **488 labelled ML samples** — the remaining 91 rows were dropped because insufficient forward price data was available at the end of the date range.
 
 ### Pipeline Architecture
 
@@ -634,3 +762,16 @@ TSLA,2026-06-16,...,248.30,244.10,241.50,246.80,-0.00682,-0.02282,-0.03243,-0.01
 | Insufficient future trading days | Row skipped, warning logged |
 | All required future closes missing | `LabelGenerationError` raised |
 | `NULL` close price in database | Treated as missing, row skipped |
+
+---
+
+## Next Phase — Phase 7: XGBoost Training
+
+With 488 labelled samples and a 22-feature dataset ready, Phase 7 will:
+
+- **Train an XGBoost classifier** on the `label_direction` (BUY / HOLD / SELL) target
+- **Analyse feature importance** to understand which sentiment signals are most predictive
+- **Cross-validate** with time-series-aware splits to avoid look-ahead bias
+- **Tune hyperparameters** via grid or Bayesian search
+- **Evaluate** with precision, recall, F1, and confusion matrix per class
+- **Expose a prediction API** that takes a feature row and returns a direction signal
