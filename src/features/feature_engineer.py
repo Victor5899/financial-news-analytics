@@ -7,14 +7,25 @@ CSV to ``data/features/``.
 
 Feature groups
 --------------
-Sentiment : article counts, pos/neu/neg ratios, score statistics
-Source    : unique source count, per-source article counts
-Time      : article volumes in sliding windows (24 h, 3 d, 7 d)
-Rolling   : rolling mean sentiment and article volume over 3- and 7-day windows
+Sentiment   : article counts, pos/neu/neg ratios, score statistics
+Source      : unique source count, per-source article counts
+Time        : article volumes in sliding windows (24 h, 3 d, 7 d)
+Rolling     : rolling mean sentiment and article volume over 3- and 7-day windows
+Trend       : SMA 10/20, EMA 10/20
+Momentum    : RSI 14, MACD line, MACD signal, MACD histogram
+Volatility  : Bollinger upper/lower/width, ATR 14, 20-day rolling volatility
+Returns     : 1-day, 5-day, 10-day price percentage changes
+Volume      : volume change (%), 5-day average volume, volume-to-average ratio
 
 The rolling mean is calculated from *daily aggregates* (each calendar day
 contributes equally regardless of how many articles it contains), which
 produces a smoother, less volume-biased signal for ML.
+
+All technical indicators are derived from historical OHLCV data stored in
+the ``stock_prices`` table (Phase 5).  They are computed with pandas only —
+no external TA libraries are used.  Rows where insufficient price history
+exists for an indicator are left as NaN rather than filled with arbitrary
+values.
 
 Usage
 -----
@@ -27,13 +38,29 @@ Usage
 Output column order
 -------------------
     ticker, date,
+    # Sentiment (11)
     article_count, positive_count, neutral_count, negative_count,
     positive_ratio, neutral_ratio, negative_ratio,
-    mean_sentiment_score, sentiment_score_std, sentiment_score_min, sentiment_score_max,
-    unique_source_count, yahoo_article_count, benzinga_article_count, cnbc_article_count,
+    mean_sentiment_score, sentiment_score_std, sentiment_score_min,
+    sentiment_score_max,
+    # Source (4)
+    unique_source_count, yahoo_article_count, benzinga_article_count,
+    cnbc_article_count,
+    # Time (3)
     articles_last_24h, articles_last_3d, articles_last_7d,
+    # Rolling (4)
     rolling_3d_mean_sentiment, rolling_7d_mean_sentiment,
-    rolling_3d_article_volume, rolling_7d_article_volume
+    rolling_3d_article_volume, rolling_7d_article_volume,
+    # Trend (4)
+    sma_10, sma_20, ema_10, ema_20,
+    # Momentum (4)
+    rsi_14, macd, macd_signal, macd_histogram,
+    # Volatility (5)
+    bb_upper, bb_lower, bb_width, atr_14, volatility_20d,
+    # Returns (3)
+    price_chg_1d, price_chg_5d, price_chg_10d,
+    # Volume (3)
+    volume_change_pct, volume_avg_5d, volume_ratio
 """
 
 from __future__ import annotations
@@ -46,7 +73,7 @@ import pandas as pd
 from sqlalchemy import select
 
 from src.storage.database import DatabaseManager
-from src.storage.models import NewsArticle, SentimentResult
+from src.storage.models import NewsArticle, SentimentResult, StockPrice
 from src.utils.config import settings
 from src.utils.logger import get_logger
 
@@ -56,7 +83,8 @@ logger = get_logger(__name__)
 
 # ── Feature column ordering ───────────────────────────────────────────────────
 
-FEATURE_COLUMNS: list[str] = [
+#: Sentiment, source, time, and rolling feature columns (Phase 4 originals).
+_SENTIMENT_FEATURE_COLUMNS: list[str] = [
     "ticker",
     "date",
     # Sentiment
@@ -87,6 +115,37 @@ FEATURE_COLUMNS: list[str] = [
     "rolling_7d_article_volume",
 ]
 
+#: Technical indicator feature columns added in Phase 4 extension.
+TECHNICAL_FEATURE_COLUMNS: list[str] = [
+    # Trend
+    "sma_10",
+    "sma_20",
+    "ema_10",
+    "ema_20",
+    # Momentum
+    "rsi_14",
+    "macd",
+    "macd_signal",
+    "macd_histogram",
+    # Volatility
+    "bb_upper",
+    "bb_lower",
+    "bb_width",
+    "atr_14",
+    "volatility_20d",
+    # Returns (price-based; prefixed to avoid collision with ML label columns)
+    "price_chg_1d",
+    "price_chg_5d",
+    "price_chg_10d",
+    # Volume
+    "volume_change_pct",
+    "volume_avg_5d",
+    "volume_ratio",
+]
+
+#: Full canonical output column order (sentinel + sentiment + technical).
+FEATURE_COLUMNS: list[str] = _SENTIMENT_FEATURE_COLUMNS + TECHNICAL_FEATURE_COLUMNS
+
 
 # ── Exceptions ────────────────────────────────────────────────────────────────
 
@@ -102,7 +161,7 @@ class FeatureGenerationError(FeatureEngineeringError):
     """Raised when feature computation fails."""
 
 
-# ── Private feature-computation helpers ──────────────────────────────────────
+# ── Private sentiment / source / time / rolling helpers ──────────────────────
 
 def _compute_sentiment_features(df: pd.DataFrame) -> dict[str, Any]:
     """
@@ -303,7 +362,356 @@ def _compute_rolling_features(
     }
 
 
+# ── Private technical-indicator primitives ────────────────────────────────────
+
+def _sma(series: pd.Series, window: int) -> pd.Series:
+    """Simple Moving Average over ``window`` periods."""
+    return series.rolling(window=window, min_periods=window).mean()
+
+
+def _ema(series: pd.Series, span: int) -> pd.Series:
+    """Exponential Moving Average with ``span`` periods (pandas EWM, adjust=False)."""
+    return series.ewm(span=span, adjust=False, min_periods=span).mean()
+
+
+def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    """
+    Relative Strength Index using Wilder's smoothing (EWM with alpha = 1 / period).
+
+    Returns values in [0, 100].  NaN for the first ``period`` rows.
+    When all gains in the window are zero (pure downtrend) RSI → 0.
+    When all losses are zero (pure uptrend) RSI → 100.
+    """
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = (-delta).clip(lower=0.0)
+    avg_gain = gain.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+    # Guard: where avg_loss == 0, RSI should be 100 (no losing periods)
+    rs = avg_gain / avg_loss.mask(avg_loss == 0.0)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    return rsi.where(avg_loss != 0.0, other=100.0)
+
+
+def _macd_lines(
+    close: pd.Series,
+    fast: int = 12,
+    slow: int = 26,
+    signal_span: int = 9,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """
+    MACD line, signal line, and histogram.
+
+    Returns
+    -------
+    tuple
+        ``(macd_line, signal_line, histogram)`` — all ``pd.Series``.
+        NaN for the first ``slow + signal_span - 1`` rows.
+    """
+    ema_fast = close.ewm(span=fast, adjust=False, min_periods=fast).mean()
+    ema_slow = close.ewm(span=slow, adjust=False, min_periods=slow).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal_span, adjust=False, min_periods=signal_span).mean()
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+
+def _bollinger_bands(
+    close: pd.Series,
+    window: int = 20,
+    num_std: float = 2.0,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """
+    Bollinger upper band, lower band, and bandwidth.
+
+    Bandwidth is defined as ``(upper − lower) / middle``.
+    Returns NaN for the first ``window − 1`` rows.
+    """
+    sma = close.rolling(window=window, min_periods=window).mean()
+    std = close.rolling(window=window, min_periods=window).std(ddof=1)
+    upper = sma + num_std * std
+    lower = sma - num_std * std
+    width = (upper - lower) / sma.where(sma != 0.0)
+    return upper, lower, width
+
+
+def _atr(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int = 14,
+) -> pd.Series:
+    """
+    Average True Range (ATR) using Wilder's EWM smoothing.
+
+    True Range = max(High−Low, |High−PrevClose|, |Low−PrevClose|).
+    Returns NaN for the first ``period`` rows.
+    """
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [
+            (high - low).rename("hl"),
+            (high - prev_close).abs().rename("hpc"),
+            (low - prev_close).abs().rename("lpc"),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return tr.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+
+
+# ── Private technical feature-group helpers ───────────────────────────────────
+
+def _extract_at(
+    series: pd.Series,
+    dates: pd.Series,
+    target_date: date,
+) -> float | None:
+    """
+    Extract a scalar value from a computed indicator series at ``target_date``.
+
+    Parameters
+    ----------
+    series : pd.Series
+        Computed indicator values (same index as ``dates``).
+    dates : pd.Series
+        Trading dates corresponding to each row of ``series``.
+    target_date : date
+        The date to extract the value for.
+
+    Returns
+    -------
+    float | None
+        Rounded value, or ``None`` if the date is absent or the value is NaN.
+    """
+    mask = dates == target_date
+    if not mask.any():
+        return None
+    val = series[mask].iloc[-1]
+    if pd.isna(val):
+        return None
+    return round(float(val), 8)
+
+
+def _compute_trend_features(
+    prices_df: pd.DataFrame,
+    target_date: date,
+) -> dict[str, float | None]:
+    """
+    Compute SMA 10/20 and EMA 10/20 for ``target_date``.
+
+    Parameters
+    ----------
+    prices_df : pd.DataFrame
+        OHLCV rows for a single ticker, sorted ascending by ``trading_date``.
+        Must contain ``close_price`` and ``trading_date`` columns.
+    target_date : date
+        The date for which indicator values are extracted.
+
+    Returns
+    -------
+    dict
+        ``sma_10``, ``sma_20``, ``ema_10``, ``ema_20``.
+    """
+    close = prices_df["close_price"].astype(float)
+    dates = prices_df["trading_date"]
+
+    def ex(s: pd.Series) -> float | None:
+        return _extract_at(s, dates, target_date)
+
+    return {
+        "sma_10": ex(_sma(close, 10)),
+        "sma_20": ex(_sma(close, 20)),
+        "ema_10": ex(_ema(close, 10)),
+        "ema_20": ex(_ema(close, 20)),
+    }
+
+
+def _compute_momentum_features(
+    prices_df: pd.DataFrame,
+    target_date: date,
+) -> dict[str, float | None]:
+    """
+    Compute RSI 14, MACD line, signal, and histogram for ``target_date``.
+
+    Parameters
+    ----------
+    prices_df : pd.DataFrame
+        OHLCV rows for a single ticker, sorted ascending by ``trading_date``.
+    target_date : date
+        The date for which indicator values are extracted.
+
+    Returns
+    -------
+    dict
+        ``rsi_14``, ``macd``, ``macd_signal``, ``macd_histogram``.
+    """
+    close = prices_df["close_price"].astype(float)
+    dates = prices_df["trading_date"]
+
+    def ex(s: pd.Series) -> float | None:
+        return _extract_at(s, dates, target_date)
+
+    macd_line, signal_line, histogram = _macd_lines(close)
+    return {
+        "rsi_14":         ex(_rsi(close, 14)),
+        "macd":           ex(macd_line),
+        "macd_signal":    ex(signal_line),
+        "macd_histogram": ex(histogram),
+    }
+
+
+def _compute_volatility_features(
+    prices_df: pd.DataFrame,
+    target_date: date,
+) -> dict[str, float | None]:
+    """
+    Compute Bollinger Bands (upper/lower/width), ATR 14, and 20-day rolling
+    volatility for ``target_date``.
+
+    Parameters
+    ----------
+    prices_df : pd.DataFrame
+        OHLCV rows for a single ticker, sorted ascending by ``trading_date``.
+        Must contain ``close_price``, ``high_price``, ``low_price``.
+    target_date : date
+        The date for which indicator values are extracted.
+
+    Returns
+    -------
+    dict
+        ``bb_upper``, ``bb_lower``, ``bb_width``, ``atr_14``, ``volatility_20d``.
+    """
+    close = prices_df["close_price"].astype(float)
+    high  = prices_df["high_price"].astype(float)
+    low   = prices_df["low_price"].astype(float)
+    dates = prices_df["trading_date"]
+
+    def ex(s: pd.Series) -> float | None:
+        return _extract_at(s, dates, target_date)
+
+    bb_upper, bb_lower, bb_width = _bollinger_bands(close, window=20)
+    daily_ret = close.pct_change()
+    vol_20d   = daily_ret.rolling(window=20, min_periods=20).std(ddof=1)
+
+    return {
+        "bb_upper":       ex(bb_upper),
+        "bb_lower":       ex(bb_lower),
+        "bb_width":       ex(bb_width),
+        "atr_14":         ex(_atr(high, low, close, 14)),
+        "volatility_20d": ex(vol_20d),
+    }
+
+
+def _compute_return_features(
+    prices_df: pd.DataFrame,
+    target_date: date,
+) -> dict[str, float | None]:
+    """
+    Compute 1-day, 5-day, and 10-day percentage price changes for ``target_date``.
+
+    Column names use the ``price_chg_`` prefix to avoid collision with the
+    ``return_*`` ML label columns produced by Phase 6.
+
+    Parameters
+    ----------
+    prices_df : pd.DataFrame
+        OHLCV rows for a single ticker, sorted ascending by ``trading_date``.
+    target_date : date
+        The date for which values are extracted.
+
+    Returns
+    -------
+    dict
+        ``price_chg_1d``, ``price_chg_5d``, ``price_chg_10d``.
+    """
+    close = prices_df["close_price"].astype(float)
+    dates = prices_df["trading_date"]
+
+    def ex(s: pd.Series) -> float | None:
+        return _extract_at(s, dates, target_date)
+
+    return {
+        "price_chg_1d":  ex(close.pct_change(1)),
+        "price_chg_5d":  ex(close.pct_change(5)),
+        "price_chg_10d": ex(close.pct_change(10)),
+    }
+
+
+def _compute_volume_features(
+    prices_df: pd.DataFrame,
+    target_date: date,
+) -> dict[str, float | None]:
+    """
+    Compute volume change (%), 5-day average volume, and volume/average ratio
+    for ``target_date``.
+
+    Parameters
+    ----------
+    prices_df : pd.DataFrame
+        OHLCV rows for a single ticker, sorted ascending by ``trading_date``.
+        Must contain ``volume`` and ``trading_date`` columns.
+    target_date : date
+        The date for which values are extracted.
+
+    Returns
+    -------
+    dict
+        ``volume_change_pct``, ``volume_avg_5d``, ``volume_ratio``.
+    """
+    volume = prices_df["volume"].astype(float)
+    dates  = prices_df["trading_date"]
+
+    def ex(s: pd.Series) -> float | None:
+        return _extract_at(s, dates, target_date)
+
+    vol_avg_5d = volume.rolling(window=5, min_periods=5).mean()
+    vol_ratio  = volume / vol_avg_5d.mask(vol_avg_5d == 0.0)
+
+    return {
+        "volume_change_pct": ex(volume.pct_change(1)),
+        "volume_avg_5d":     ex(vol_avg_5d),
+        "volume_ratio":      ex(vol_ratio),
+    }
+
+
+def _compute_technical_features(
+    prices_df: pd.DataFrame,
+    target_date: date,
+) -> dict[str, float | None]:
+    """
+    Orchestrate all technical indicator feature groups for one ticker.
+
+    Parameters
+    ----------
+    prices_df : pd.DataFrame
+        OHLCV rows for a **single ticker**, sorted ascending by
+        ``trading_date``.  Must contain ``trading_date``, ``open_price``,
+        ``high_price``, ``low_price``, ``close_price``, and ``volume``.
+    target_date : date
+        The date for which indicator values are extracted.
+
+    Returns
+    -------
+    dict
+        All 19 technical feature key-value pairs (values may be ``None``
+        when the series contains insufficient history at ``target_date``).
+    """
+    result: dict[str, float | None] = {}
+    result.update(_compute_trend_features(prices_df, target_date))
+    result.update(_compute_momentum_features(prices_df, target_date))
+    result.update(_compute_volatility_features(prices_df, target_date))
+    result.update(_compute_return_features(prices_df, target_date))
+    result.update(_compute_volume_features(prices_df, target_date))
+    return result
+
+
 # ── FeatureEngineer ───────────────────────────────────────────────────────────
+
+#: Calendar days of price history to load when technical indicators are needed.
+#: 90 days ≈ 63 trading days — sufficient for the slowest indicator (MACD
+#: signal line, which needs ~35 trading days of warm-up).
+_PRICE_LOOKBACK_DAYS: int = 90
+
 
 class FeatureEngineer:
     """
@@ -446,10 +854,91 @@ class FeatureEngineer:
         )
         return df
 
+    def load_price_data(
+        self,
+        tickers: list[str] | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> pd.DataFrame:
+        """
+        Load historical OHLCV price data from the ``stock_prices`` table.
+
+        Parameters
+        ----------
+        tickers : list[str] | None
+            Ticker symbols to load.  ``None`` loads all available tickers.
+        start_date : date | None
+            Inclusive lower bound on ``trading_date``.  ``None`` imposes no
+            lower bound.
+        end_date : date | None
+            Inclusive upper bound on ``trading_date``.  ``None`` imposes no
+            upper bound.
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns: ``ticker``, ``trading_date``, ``open_price``,
+            ``high_price``, ``low_price``, ``close_price``,
+            ``adjusted_close``, ``volume``.
+            Sorted ascending by ``(ticker, trading_date)``.
+            Returns an empty DataFrame when no rows are found.
+
+        Raises
+        ------
+        DataLoadError
+            On any database connectivity or query failure.
+        """
+        try:
+            db = self._get_db()
+
+            stmt = select(
+                StockPrice.ticker.label("ticker"),
+                StockPrice.trading_date.label("trading_date"),
+                StockPrice.open_price.label("open_price"),
+                StockPrice.high_price.label("high_price"),
+                StockPrice.low_price.label("low_price"),
+                StockPrice.close_price.label("close_price"),
+                StockPrice.adjusted_close.label("adjusted_close"),
+                StockPrice.volume.label("volume"),
+            ).order_by(StockPrice.ticker, StockPrice.trading_date)
+
+            if tickers:
+                stmt = stmt.where(
+                    StockPrice.ticker.in_([t.upper() for t in tickers])
+                )
+            if start_date is not None:
+                stmt = stmt.where(StockPrice.trading_date >= start_date)
+            if end_date is not None:
+                stmt = stmt.where(StockPrice.trading_date <= end_date)
+
+            with db.engine.connect() as conn:
+                df = pd.read_sql(stmt, conn)
+
+        except FeatureEngineeringError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise DataLoadError(
+                f"Failed to load price data from database: {exc}"
+            ) from exc
+
+        if df.empty:
+            logger.debug(
+                f"No price data found for tickers={tickers or 'all'} "
+                f"({start_date} → {end_date})"
+            )
+        else:
+            logger.debug(
+                f"Loaded {len(df)} price rows for "
+                f"{df['ticker'].nunique()} ticker(s) "
+                f"({start_date} → {end_date})"
+            )
+        return df
+
     def generate_features(
         self,
         raw_df: pd.DataFrame,
         target_date: date,
+        prices_df: pd.DataFrame | None = None,
     ) -> pd.DataFrame:
         """
         Compute per-ticker feature vectors for the given target date.
@@ -459,6 +948,10 @@ class FeatureEngineer:
         silently skipped (rolling and time features can still use historical
         data from the window).
 
+        When ``prices_df`` is provided, 19 technical indicator columns are
+        appended to each row.  Values for indicators that cannot be computed
+        (due to insufficient price history) are left as ``None`` / NaN.
+
         Parameters
         ----------
         raw_df : pd.DataFrame
@@ -467,6 +960,11 @@ class FeatureEngineer:
         target_date : date
             The date for which same-day features are computed (sentiment,
             source).  Rolling and time features look back from this date.
+        prices_df : pd.DataFrame | None
+            Optional OHLCV price DataFrame (output of :meth:`load_price_data`).
+            When provided, technical indicator features are merged into each
+            row.  When ``None``, technical feature columns are included with
+            ``None`` values (backward-compatible).
 
         Returns
         -------
@@ -508,6 +1006,22 @@ class FeatureEngineer:
             row.update(_compute_source_features(target_df))
             row.update(_compute_time_features(ticker_df, target_date))
             row.update(_compute_rolling_features(ticker_df, target_date))
+
+            # ── Technical indicators ─────────────────────────────────────────
+            tech: dict[str, float | None] = {
+                col: None for col in TECHNICAL_FEATURE_COLUMNS
+            }
+            if prices_df is not None and not prices_df.empty:
+                ticker_prices = prices_df[prices_df["ticker"] == ticker].copy()
+                if not ticker_prices.empty:
+                    ticker_prices = (
+                        ticker_prices
+                        .sort_values("trading_date")
+                        .reset_index(drop=True)
+                    )
+                    tech.update(_compute_technical_features(ticker_prices, target_date))
+            row.update(tech)
+
             rows.append(row)
 
         if not rows:
@@ -518,7 +1032,7 @@ class FeatureEngineer:
 
         features_df = pd.DataFrame(rows)[FEATURE_COLUMNS]
         logger.info(
-            f"Generated {len(features_df[FEATURE_COLUMNS]) - 2} features "  # minus ticker+date
+            f"Generated {len(FEATURE_COLUMNS) - 2} features "
             f"for {len(features_df)} ticker(s) on {target_date}"
         )
         return features_df
@@ -576,6 +1090,11 @@ class FeatureEngineer:
         skipped (rolling / time features for adjacent dates are unaffected
         because the full window is already in memory).
 
+        Technical indicators are computed from a single price data load
+        spanning ``[start_date − _PRICE_LOOKBACK_DAYS, end_date]``.  If the
+        ``stock_prices`` table contains no data, technical columns are ``None``
+        for all rows.
+
         Parameters
         ----------
         start_date : date
@@ -630,6 +1149,23 @@ class FeatureEngineer:
             )
             return pd.DataFrame(columns=FEATURE_COLUMNS)
 
+        # Load price data once for the full range (with indicator warm-up buffer)
+        prices_df: pd.DataFrame | None = None
+        try:
+            price_start = start_date - timedelta(days=_PRICE_LOOKBACK_DAYS)
+            loaded = self.load_price_data(
+                tickers=tickers,
+                start_date=price_start,
+                end_date=end_date,
+            )
+            if not loaded.empty:
+                prices_df = loaded
+        except DataLoadError as exc:
+            logger.warning(
+                f"run_range: could not load price data ({exc}) — "
+                "technical indicator columns will be None for all rows"
+            )
+
         all_frames: list[pd.DataFrame] = []
         dates_processed = 0
         dates_skipped = 0
@@ -637,7 +1173,9 @@ class FeatureEngineer:
         current = start_date
         while current <= end_date:
             try:
-                features_df = self.generate_features(raw_df, current)
+                features_df = self.generate_features(
+                    raw_df, current, prices_df=prices_df
+                )
                 all_frames.append(features_df)
                 dates_processed += 1
             except FeatureGenerationError:
@@ -720,7 +1258,26 @@ class FeatureEngineer:
             logger.warning("No data loaded — returning empty feature DataFrame.")
             return pd.DataFrame(columns=FEATURE_COLUMNS)
 
-        features_df = self.generate_features(raw_df, target_date)
+        # Load price data for technical indicator computation
+        prices_df: pd.DataFrame | None = None
+        try:
+            price_start = target_date - timedelta(days=_PRICE_LOOKBACK_DAYS)
+            loaded = self.load_price_data(
+                tickers=tickers,
+                start_date=price_start,
+                end_date=target_date,
+            )
+            if not loaded.empty:
+                prices_df = loaded
+        except DataLoadError as exc:
+            logger.warning(
+                f"Could not load price data ({exc}) — "
+                "technical indicator columns will be None"
+            )
+
+        features_df = self.generate_features(
+            raw_df, target_date, prices_df=prices_df
+        )
 
         if output_dir is not None:
             date_tag = target_date.strftime("%Y-%m-%d")

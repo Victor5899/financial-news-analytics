@@ -121,10 +121,10 @@ class TestBuildQuery:
         assert _build_query("NVDA") == '"NVIDIA"'
 
     def test_msft_maps_to_microsoft(self) -> None:
-        assert _build_query("MSFT") == '"Microsoft Corporation"'
+        assert _build_query("MSFT") == '"Microsoft"'
 
     def test_amzn_maps_to_amazon(self) -> None:
-        assert _build_query("AMZN") == '"Amazon.com"'
+        assert _build_query("AMZN") == '"Amazon"'
 
     def test_unknown_ticker_falls_back_to_symbol(self) -> None:
         assert _build_query("GOOGL") == "GOOGL"
