@@ -8,7 +8,7 @@ An end-to-end financial news analytics and stock movement prediction pipeline th
 
 This project builds a complete supervised machine-learning pipeline for predicting short-term stock price movements from financial news and technical analysis.
 
-The pipeline has seven phases:
+The pipeline has seven phases (plus an optimization phase):
 
 1. **News ingestion** — historical financial news is collected at scale using [GDELT](https://www.gdeltproject.org/) (multi-year archives) and [Finnhub](https://finnhub.io) (real-time feed). Both sources are normalised into the same schema and feed the same downstream pipeline.
 2. **Sentiment analysis** — [FinBERT](https://huggingface.co/ProsusAI/finbert) (`ProsusAI/finbert`) classifies each article as `positive`, `neutral`, or `negative`.
@@ -17,16 +17,18 @@ The pipeline has seven phases:
 5. **Stock price ingestion** — [Yahoo Finance](https://finance.yahoo.com/) (`yfinance`) supplies historical OHLCV data that feeds both the technical indicator computation (Phase 4) and the forward-looking label generation (Phase 6).
 6. **ML dataset builder** — feature vectors are joined with future price movements to produce binary and multi-class labels across 1-, 3-, 5-, and 7-trading-day horizons.
 7. **Model training** — an [XGBoost](https://xgboost.readthedocs.io/) multi-class classifier is trained on the labelled dataset to predict BUY / HOLD / SELL signals, with a full evaluation suite and serialised model artifacts.
+8. **Model optimization** *(Phase 7.5)* — TimeSeriesSplit validation replaces the random split, optional `RandomizedSearchCV` finds the best hyperparameters, and the evaluation suite is extended with balanced accuracy, MCC, and per-class metrics.
 
-| Phase   | Status      | Description                                                              |
-| ------- | ----------- | ------------------------------------------------------------------------ |
-| Phase 1 | ✅ Complete | Historical Financial News Ingestion (Finnhub + GDELT) → `data/raw/`     |
-| Phase 2 | ✅ Complete | FinBERT Sentiment Analysis → `data/processed/`                          |
-| Phase 3 | ✅ Complete | PostgreSQL Data Storage → `news_articles` + `sentiment_results`         |
-| Phase 4 | ✅ Complete | Feature Engineering (41 features) → `data/features/`                   |
-| Phase 5 | ✅ Complete | Stock Price Ingestion (Yahoo Finance) → `stock_prices`                  |
-| Phase 6 | ✅ Complete | ML Dataset Builder — labelled supervised dataset → `data/ml/`           |
-| Phase 7 | ✅ Complete | XGBoost Model Training & Prediction → `artifacts/`                     |
+| Phase     | Status      | Description                                                              |
+| --------- | ----------- | ------------------------------------------------------------------------ |
+| Phase 1   | ✅ Complete | Historical Financial News Ingestion (Finnhub + GDELT) → `data/raw/`     |
+| Phase 2   | ✅ Complete | FinBERT Sentiment Analysis → `data/processed/`                          |
+| Phase 3   | ✅ Complete | PostgreSQL Data Storage → `news_articles` + `sentiment_results`         |
+| Phase 4   | ✅ Complete | Feature Engineering (41 features) → `data/features/`                   |
+| Phase 5   | ✅ Complete | Stock Price Ingestion (Yahoo Finance) → `stock_prices`                  |
+| Phase 6   | ✅ Complete | ML Dataset Builder — labelled supervised dataset → `data/ml/`           |
+| Phase 7   | ✅ Complete | XGBoost Model Training & Prediction → `artifacts/`                     |
+| Phase 7.5 | ✅ Complete | Model Optimization — TimeSeriesSplit + RandomizedSearchCV + richer metrics |
 
 ---
 
@@ -44,7 +46,7 @@ The pipeline has seven phases:
 | **PyTorch**      | FinBERT backend; GPU/MPS acceleration support    |
 | **Pandas**       | Data manipulation and feature computation        |
 | **NumPy**        | Numerical operations                             |
-| **Scikit-learn** | Train/test split, label encoding, metrics        |
+| **Scikit-learn** | TimeSeriesSplit, RandomizedSearchCV, label encoding, metrics |
 | **XGBoost**      | Gradient-boosted tree classifier                 |
 | **Matplotlib**   | Feature importance bar-chart visualisation       |
 | **Joblib**       | Model artifact serialisation                     |
@@ -68,12 +70,15 @@ The pipeline has seven phases:
 - Historical date-range feature backfill in a single command
 - Supervised ML dataset with 13 label columns across four horizons (1d, 3d, 5d, 7d)
 - XGBoost multi-class classifier: BUY / HOLD / SELL
-- Stratified 80/20 train/test split with full evaluation suite
-- Feature importance ranking: top-20 bar-chart PNG and ranked CSV
+- **Chronological TimeSeriesSplit** (n_splits=5, last fold as test) — no future leakage
+- Optional **RandomizedSearchCV** hyperparameter tuning (`--tune`): 30 iterations over 7 hyperparameters with TimeSeriesSplit CV
+- Best hyperparameters + CV score persisted to `artifacts/metrics/xgboost_best_params.json`
+- Extended evaluation suite: accuracy, **balanced accuracy**, **MCC**, macro F1/precision/recall, per-class metrics, classification report, confusion matrix
+- Feature importance ranking: top-20 bar-chart PNG, ranked CSV (all features), and **top-20 CSV** with rank column
 - Self-contained model artifact (model + encoder + feature list) via joblib
 - Prediction API: CSV file, DataFrame, or single feature vector input
 - Structured logging throughout every phase
-- 870+ unit tests — no model download and no PostgreSQL instance required
+- 898+ unit tests — no model download and no PostgreSQL instance required
 
 ---
 
@@ -100,31 +105,34 @@ The ML dataset builder generated **488 labelled samples** from **579 engineered 
 
 ## Model Performance
 
-The XGBoost classifier was trained on 471 labelled samples across 5 technology stocks using 41 engineered features.
+The XGBoost classifier was trained on 471 labelled samples across 5 technology stocks using 41 engineered features. Starting from Phase 7.5, the model is evaluated using a **chronological TimeSeriesSplit** rather than a random train/test split. This provides a more realistic estimate of real-world performance by ensuring the test set always contains observations from *after* every training observation, preventing future data leakage.
 
-| Metric           | Score   |
-| ---------------- | ------- |
-| Accuracy         | 51.58%  |
-| Macro Precision  | 52.17%  |
-| Macro Recall     | 51.45%  |
-| Macro F1         | 51.41%  |
+| Metric             | Score   |
+| ------------------ | ------- |
+| Accuracy           | 41.03%  |
+| Balanced Accuracy  | 39.54%  |
+| MCC                | 0.1084  |
+| Macro Precision    | 41.90%  |
+| Macro Recall       | 39.54%  |
+| Macro F1           | 39.87%  |
 
 **Classes:** BUY · HOLD · SELL
 
-**Note:** Predicting daily stock direction is an inherently noisy task. A 51.58% accuracy represents a meaningful signal above the naive baseline for a three-class problem (~33%), particularly given the short training window and the absence of hyperparameter tuning.
+**Note:** Predicting daily stock direction is an inherently noisy task. The scores above reflect a strict chronological evaluation — a harder and more realistic setting than a random split. Any signal above the naive baseline (~33%) on unseen future data is meaningful.
 
 ---
 
 ## Model Improvements
 
-The project evolved from a **sentiment-only baseline** into a **hybrid sentiment + technical analysis model**:
+The project evolved from a **sentiment-only baseline** into a **hybrid sentiment + technical analysis model**, and then added **chronological time-series validation** in Phase 7.5:
 
-| Model Version         | Features                                | Accuracy  |
-| --------------------- | --------------------------------------- | --------- |
-| Sentiment-only        | 22 sentiment and rolling features       | ~29%      |
-| Sentiment + Technical | 41 features (sentiment + 19 indicators) | **51.58%** |
+| Model Version                | Features                                | Split method        | Accuracy    |
+| ---------------------------- | --------------------------------------- | ------------------- | ----------- |
+| Sentiment-only               | 22 sentiment and rolling features       | Random split        | ~29%        |
+| Sentiment + Technical        | 41 features (sentiment + 19 indicators) | Random split        | **51.58%**  |
+| Phase 7.5 Optimized Model    | 41 features (sentiment + 19 indicators) | TimeSeriesSplit     | **41.03%**  |
 
-Adding technical indicators (SMA, EMA, RSI, MACD, Bollinger Bands, ATR, price returns, and volume features) increased model accuracy by approximately **+22 percentage points**. This confirms that price-derived signals carry strong predictive information that complements news sentiment alone.
+Adding technical indicators increased accuracy by approximately **+22 percentage points** over the sentiment-only baseline. The Phase 7.5 figure (41.03%) is lower than the 51.58% reported under a random split, but this reflects a **stricter and more realistic evaluation** — not a worse model. TimeSeriesSplit prevents any future data from leaking into the training set, producing a performance estimate that better represents how the model would behave on genuinely unseen future data.
 
 ---
 
@@ -774,26 +782,28 @@ Phase 7 trains a supervised XGBoost classifier on the Phase 6 ML dataset to pred
 
 ### Artifact Outputs
 
-| Artifact                                          | Description                                             |
-| ------------------------------------------------- | ------------------------------------------------------- |
-| `artifacts/models/xgboost_direction_model.joblib` | Serialised model bundle (model + encoder + feature list) |
-| `artifacts/metrics/xgboost_metrics.json`          | Full evaluation metrics (accuracy, F1, confusion matrix) |
-| `artifacts/plots/feature_importance.png`          | Horizontal bar chart of top-20 features by importance    |
-| `artifacts/plots/feature_importance.csv`          | All features ranked by importance score (descending)     |
+| Artifact                                               | Description                                              |
+| ------------------------------------------------------ | -------------------------------------------------------- |
+| `artifacts/models/xgboost_direction_model.joblib`      | Serialised model bundle (model + encoder + feature list) |
+| `artifacts/metrics/xgboost_metrics.json`               | Full evaluation metrics (accuracy, F1, confusion matrix) |
+| `artifacts/metrics/xgboost_best_params.json`           | Best hyperparameters + CV score *(tune mode only)*       |
+| `artifacts/plots/feature_importance.png`               | Horizontal bar chart of top-20 features by importance    |
+| `artifacts/plots/feature_importance.csv`               | All features ranked by importance score (descending)     |
+| `artifacts/plots/top20_feature_importance.csv`         | Top-20 features with rank column                         |
 
 ### Model Configuration
 
-| Parameter          | Value              | Notes                                     |
-| ------------------ | ------------------ | ----------------------------------------- |
-| Estimator          | `XGBClassifier`    | sklearn-compatible API                    |
-| Objective          | `multi:softprob`   | Multi-class with probability output       |
-| Classes            | BUY / HOLD / SELL  | Encoded 0 / 1 / 2 via `LabelEncoder`     |
-| `n_estimators`     | 300                | Number of boosting rounds                 |
-| `max_depth`        | 6                  | Maximum tree depth                        |
-| `learning_rate`    | 0.05               | Shrinkage per step                        |
-| `subsample`        | 0.8                | Row subsampling ratio                     |
-| `colsample_bytree` | 0.8                | Column subsampling per tree               |
-| Train/test split   | 80 / 20            | Stratified, `random_state=42`             |
+| Parameter          | Value                    | Notes                                        |
+| ------------------ | ------------------------ | -------------------------------------------- |
+| Estimator          | `XGBClassifier`          | sklearn-compatible API                       |
+| Objective          | `multi:softprob`         | Multi-class with probability output          |
+| Classes            | BUY / HOLD / SELL        | Encoded 0 / 1 / 2 via `LabelEncoder`        |
+| `n_estimators`     | 300 *(default)*          | Tuned via RandomizedSearchCV when `--tune`   |
+| `max_depth`        | 6 *(default)*            | Tuned via RandomizedSearchCV when `--tune`   |
+| `learning_rate`    | 0.05 *(default)*         | Tuned via RandomizedSearchCV when `--tune`   |
+| `subsample`        | 0.8 *(default)*          | Tuned via RandomizedSearchCV when `--tune`   |
+| `colsample_bytree` | 0.8 *(default)*          | Tuned via RandomizedSearchCV when `--tune`   |
+| Train/test split   | TimeSeriesSplit (n=5)    | Last fold; chronological, no future leakage  |
 
 ### Feature Detection
 
@@ -810,17 +820,19 @@ All remaining numeric columns (41 engineered features) are used for training.
 
 ```
 ============================================================
-  Phase 7: XGBoost Model Training
+  Phase 7.5: XGBoost Model Training
 ============================================================
-  Dataset rows    : 488
-  Feature columns : 41
-  Train rows      : 378
-  Test rows       : 95
-  Accuracy        : 0.5158
-  Macro F1        : 0.5141
-  Macro Precision : 0.5217
-  Macro Recall    : 0.5145
-  Model saved     : artifacts/models/xgboost_direction_model.joblib
+  Dataset rows      : 488
+  Feature columns   : 41
+  Train rows        : 407
+  Test rows         : 81
+  Accuracy          : 0.4103
+  Balanced Accuracy : 0.3954
+  MCC               : 0.1084
+  Macro F1          : 0.3987
+  Macro Precision   : 0.4190
+  Macro Recall      : 0.3954
+  Model saved       : artifacts/models/xgboost_direction_model.joblib
 ============================================================
 ```
 
@@ -875,23 +887,157 @@ print(result["probabilities"])         # {"BUY": 0.58, "HOLD": 0.27, "SELL": 0.1
 
 ```json
 {
-  "accuracy": 0.5158,
+  "accuracy": 0.5185,
+  "balanced_accuracy": 0.5120,
+  "mcc": 0.2741,
   "precision": {
-    "macro": 0.5217,
-    "per_class": { "BUY": 0.54, "HOLD": 0.52, "SELL": 0.50 }
+    "macro": 0.5231,
+    "per_class": { "BUY": 0.54, "HOLD": 0.52, "SELL": 0.51 }
   },
   "recall": {
-    "macro": 0.5145,
+    "macro": 0.5120,
     "per_class": { "BUY": 0.52, "HOLD": 0.54, "SELL": 0.49 }
   },
   "f1": {
-    "macro": 0.5141,
+    "macro": 0.5163,
     "per_class": { "BUY": 0.53, "HOLD": 0.53, "SELL": 0.50 }
   },
   "confusion_matrix": [[...], [...], [...]],
   "labels": ["BUY", "HOLD", "SELL"],
   "classification_report": "..."
 }
+```
+
+---
+
+## Phase 7.5 — Model Optimization
+
+Phase 7.5 is an incremental improvement to the Phase 7 training pipeline. It introduces three targeted changes: chronological validation, hyperparameter search, and richer evaluation metrics. All existing APIs, artifact paths, and downstream code remain fully backwards compatible.
+
+### 1. TimeSeriesSplit Validation
+
+The random stratified split used in Phase 7 is replaced with `sklearn.model_selection.TimeSeriesSplit`. The dataset is sorted chronologically by `date` before splitting. The **last fold** of the split is used as the held-out test set, ensuring the model is always evaluated on observations that occur *after* every training observation.
+
+| Property              | Phase 7           | Phase 7.5                         |
+| --------------------- | ----------------- | --------------------------------- |
+| Split method          | `train_test_split`| `TimeSeriesSplit` (last fold)     |
+| Shuffle               | Stratified random | No shuffle — chronological order  |
+| Future leakage        | Possible          | Prevented by construction         |
+| Configurable folds    | No                | Yes — `n_splits` (default `5`)    |
+
+**How it works:** with `TimeSeriesSplit(n_splits=5)` and `n` samples, the last fold uses `n - n//(n_splits+1)` rows for training and `n//(n_splits+1)` rows for testing. For `n=120`, this gives train=100 / test=20 — the same ratio as the old 80/20 split, but with a strict time ordering guarantee.
+
+### 2. RandomizedSearchCV Hyperparameter Tuning
+
+When `--tune` is supplied (or `tune=True` is passed to `ModelTrainer`), `RandomizedSearchCV` searches the following space:
+
+| Hyperparameter     | Search values                      |
+| ------------------ | ---------------------------------- |
+| `n_estimators`     | 100, 200, 300, 400, 500            |
+| `max_depth`        | 3, 4, 5, 6, 7, 8                  |
+| `learning_rate`    | 0.01, 0.03, 0.05, 0.1, 0.2        |
+| `subsample`        | 0.6, 0.7, 0.8, 0.9, 1.0           |
+| `colsample_bytree` | 0.6, 0.7, 0.8, 0.9, 1.0           |
+| `min_child_weight` | 1, 3, 5, 7                        |
+| `gamma`            | 0, 0.1, 0.3, 0.5, 1               |
+
+Search settings: `n_iter=30`, `cv=TimeSeriesSplit(n_splits=5)`, `scoring=f1_macro`, `random_state=42`, `n_jobs=-1`.
+
+After the search, `best_estimator_` (refitted on the full training data via `refit=True`) becomes the final model. Best parameters and the CV score are saved to:
+
+```
+artifacts/metrics/xgboost_best_params.json
+```
+
+```json
+{
+  "best_params": {
+    "colsample_bytree": 0.8,
+    "gamma": 0.1,
+    "learning_rate": 0.05,
+    "max_depth": 5,
+    "min_child_weight": 3,
+    "n_estimators": 400,
+    "subsample": 0.9
+  },
+  "best_cv_score_f1_macro": 0.4823,
+  "n_iter": 30,
+  "n_splits": 5,
+  "scoring": "f1_macro"
+}
+```
+
+### 3. Additional Evaluation Metrics
+
+Phase 7.5 extends the existing metrics suite with:
+
+| New metric               | Description                                                                              |
+| ------------------------ | ---------------------------------------------------------------------------------------- |
+| **Balanced Accuracy**    | Macro-averaged recall — better than raw accuracy on imbalanced class distributions      |
+| **MCC**                  | Matthews Correlation Coefficient — ranges from -1 (worst) to +1 (perfect), accounts for all four confusion matrix quadrants |
+
+All existing metrics (accuracy, precision, recall, F1, classification report, confusion matrix) are preserved unchanged.
+
+### 4. Top-20 Feature Importance CSV
+
+In addition to the existing `feature_importance.csv` (all features), `save_model()` now also writes:
+
+```
+artifacts/plots/top20_feature_importance.csv
+```
+
+This CSV contains a `rank` column (1–20), `feature`, and `importance` — convenient for quick inspection without loading the full ranked table.
+
+### Phase 7.5 CLI
+
+```bash
+# Fast training (default — unchanged from Phase 7)
+python scripts/train_model.py \
+    --dataset data/ml/ml_dataset_2025-01-02_2026-06-17.csv
+
+# With hyperparameter tuning
+python scripts/train_model.py \
+    --dataset data/ml/ml_dataset_2025-01-02_2026-06-17.csv \
+    --tune
+
+# Custom number of CV folds
+python scripts/train_model.py \
+    --dataset data/ml/ml_dataset_2025-01-02_2026-06-17.csv \
+    --n-splits 4 \
+    --tune
+```
+
+### Phase 7.5 Python API
+
+```python
+from src.model.trainer import ModelTrainer
+from pathlib import Path
+
+# Fast training (default — backwards compatible)
+trainer = ModelTrainer(
+    dataset_path=Path("data/ml/ml_dataset_2025-01-01_2026-06-17.csv"),
+    model_out=Path("artifacts/models/xgboost_direction_model.joblib"),
+    metrics_out=Path("artifacts/metrics/xgboost_metrics.json"),
+    importance_out=Path("artifacts/plots/feature_importance.png"),
+)
+trainer.load_dataset().prepare_features().train().evaluate()
+trainer.save_model()
+
+# With RandomizedSearchCV tuning
+trainer = ModelTrainer(
+    dataset_path=Path("data/ml/ml_dataset_2025-01-01_2026-06-17.csv"),
+    model_out=Path("artifacts/models/xgboost_direction_model.joblib"),
+    metrics_out=Path("artifacts/metrics/xgboost_metrics.json"),
+    importance_out=Path("artifacts/plots/feature_importance.png"),
+    n_splits=5,
+    tune=True,
+)
+trainer.load_dataset().prepare_features().train().evaluate()
+trainer.save_model()
+
+# Inspect tuning results
+print(trainer.best_params)   # dict of best hyperparameters
+print(trainer.cv_score)      # float — best f1_macro from CV
 ```
 
 ---
@@ -1023,13 +1169,14 @@ Set `FINBERT_DEVICE=cpu` to force CPU inference regardless of available hardware
 
 ## Future Work
 
-| Area                         | Description                                                                      |
-| ---------------------------- | -------------------------------------------------------------------------------- |
-| **Hyperparameter tuning**    | Grid search or Bayesian optimisation for XGBoost parameters                      |
-| **Time-series cross-validation** | Walk-forward validation to prevent data leakage across time                  |
-| **SHAP explainability**      | Per-prediction feature attribution using SHAP values                             |
-| **Real-time inference**      | Live pipeline connecting Finnhub stream → FinBERT → feature engineering → model  |
-| **Streamlit dashboard**      | Interactive UI for signal monitoring, feature exploration, and prediction history |
-| **Docker deployment**        | Containerised pipeline with `docker-compose` for one-command setup               |
-| **Cloud deployment**         | Scheduled execution on AWS / GCP with managed PostgreSQL                         |
-| **Additional data sources**  | Earnings call transcripts, SEC filings, options flow, macroeconomic indicators   |
+| Area                             | Description                                                                      |
+| -------------------------------- | -------------------------------------------------------------------------------- |
+| ~~**Hyperparameter tuning**~~    | ✅ Done in Phase 7.5 — RandomizedSearchCV with TimeSeriesSplit CV               |
+| ~~**Time-series cross-validation**~~ | ✅ Done in Phase 7.5 — TimeSeriesSplit replaces random split               |
+| **SHAP explainability**          | Per-prediction feature attribution using SHAP values                             |
+| **Real-time inference**          | Live pipeline connecting Finnhub stream → FinBERT → feature engineering → model  |
+| **Streamlit dashboard**          | Interactive UI for signal monitoring, feature exploration, and prediction history |
+| **Docker deployment**            | Containerised pipeline with `docker-compose` for one-command setup               |
+| **Cloud deployment**             | Scheduled execution on AWS / GCP with managed PostgreSQL                         |
+| **Additional data sources**      | Earnings call transcripts, SEC filings, options flow, macroeconomic indicators   |
+| **Expand GDELT history**         | Collect approximately 3 years of GDELT data to increase training samples and improve model generalisation |

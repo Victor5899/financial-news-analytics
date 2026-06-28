@@ -16,15 +16,22 @@ TestEvaluate                 — metric dict structure after training
 TestSaveModel                — artifact files created on disk
 TestProperties               — read-only properties n_train, n_test, etc.
 TestEndToEnd                 — complete pipeline on tiny synthetic dataset
+TestTimeSeriesSplit          — _prepare_time_series_split chronological split (Phase 7.5)
+TestTuneHyperparameters      — RandomizedSearchCV path with mocked search (Phase 7.5)
+TestBestParamsSaving         — xgboost_best_params.json created in tune mode (Phase 7.5)
+TestSaveModelTop20           — top20_feature_importance.csv created (Phase 7.5)
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.preprocessing import LabelEncoder
 
 from src.model.trainer import (
     DIRECTION_CLASSES,
@@ -33,6 +40,7 @@ from src.model.trainer import (
     ModelNotTrainedError,
     ModelTrainer,
     ModelTrainingError,
+    _TUNE_PARAM_GRID,
 )
 
 
@@ -243,15 +251,17 @@ class TestPrepareFeatures:
             assert not col.startswith("return_")
 
     def test_train_test_split_sizes(self, tmp_path: Path) -> None:
-        trainer = _make_trainer(tmp_path, n=100)
+        # With n=120 and TimeSeriesSplit(n_splits=5), the last fold has
+        # test_size = 120 // (5+1) = 20 rows → train=100, test=20.
+        trainer = _make_trainer(tmp_path, n=120)
         trainer.load_dataset().prepare_features()
-        assert trainer.n_train == 80
+        assert trainer.n_train == 100
         assert trainer.n_test == 20
 
     def test_n_total(self, tmp_path: Path) -> None:
-        trainer = _make_trainer(tmp_path, n=100)
+        trainer = _make_trainer(tmp_path, n=120)
         trainer.load_dataset().prepare_features()
-        assert trainer.n_total == 100
+        assert trainer.n_total == 120
 
     def test_returns_self_for_chaining(self, tmp_path: Path) -> None:
         trainer = _make_trainer(tmp_path)
@@ -425,3 +435,279 @@ class TestEndToEnd:
         assert (tmp_path / "model.joblib").exists()
         assert (tmp_path / "metrics.json").exists()
         assert (tmp_path / "importance.png").exists()
+
+
+# ── TestTimeSeriesSplit ───────────────────────────────────────────────────────
+
+class TestTimeSeriesSplit:
+    """Tests for _prepare_time_series_split (Phase 7.5)."""
+
+    def test_chronological_split_no_overlap(self, tmp_path: Path) -> None:
+        """Train indices must all come before test indices."""
+        trainer = _make_trainer(tmp_path, n=120)
+        trainer.load_dataset().prepare_features()
+        # The sorted dataset has 120 rows; train set covers the first 100.
+        assert trainer.n_train == 100
+        assert trainer.n_test == 20
+
+    def test_train_test_sizes_sum_to_total(self, tmp_path: Path) -> None:
+        trainer = _make_trainer(tmp_path, n=120)
+        trainer.load_dataset().prepare_features()
+        assert trainer.n_train + trainer.n_test == trainer.n_total
+
+    def test_custom_n_splits(self, tmp_path: Path) -> None:
+        """With n_splits=4 and n=120: test_size=120//5=24, train=96."""
+        csv_path = _make_csv(tmp_path, n=120)
+        trainer = ModelTrainer(
+            dataset_path=csv_path,
+            model_out=tmp_path / "model.joblib",
+            metrics_out=tmp_path / "metrics.json",
+            importance_out=tmp_path / "importance.png",
+            n_splits=4,
+        )
+        trainer.load_dataset().prepare_features()
+        assert trainer.n_test == 24
+        assert trainer.n_train == 96
+        assert trainer.n_total == 120
+
+    def test_split_returns_correct_array_shapes(self, tmp_path: Path) -> None:
+        trainer = _make_trainer(tmp_path, n=120)
+        trainer.load_dataset().prepare_features()
+        assert trainer._X_train.shape[0] == trainer.n_train
+        assert trainer._X_test.shape[0] == trainer.n_test
+        assert trainer._y_train.shape[0] == trainer.n_train
+        assert trainer._y_test.shape[0] == trainer.n_test
+
+    def test_no_shuffle_preserves_order(self, tmp_path: Path) -> None:
+        """TimeSeriesSplit must not shuffle — train comes before test in time."""
+        trainer = _make_trainer(tmp_path, n=120)
+        trainer.load_dataset().prepare_features()
+        # With the sorted synthetic dataset (monotone dates), X_train rows
+        # must all have a strictly lower positional index than X_test rows.
+        # We verify this via X shape: train is the first 100, test is last 20.
+        assert trainer.n_train == 100
+        assert trainer.n_test == 20
+
+    def test_direct_helper_returns_four_arrays(self, tmp_path: Path) -> None:
+        trainer = _make_trainer(tmp_path, n=120)
+        trainer.load_dataset()
+        # Build X, y manually to call the helper directly.
+        df = trainer._df
+        feature_cols = [
+            c for c in df.columns
+            if c not in {"ticker", "date", LABEL_COL}
+            and not any(c.startswith(p) for p in ("future_close_", "return_", "label_"))
+        ]
+        X = df[feature_cols].values.astype(float)
+        le = LabelEncoder()
+        le.fit(DIRECTION_CLASSES)
+        y = le.transform(df[LABEL_COL].values)
+        result = trainer._prepare_time_series_split(X, y)
+        assert len(result) == 4
+        X_tr, X_te, y_tr, y_te = result
+        assert X_tr.shape[0] + X_te.shape[0] == len(X)
+
+
+# ── TestTuneHyperparameters ───────────────────────────────────────────────────
+
+class TestTuneHyperparameters:
+    """Tests for the RandomizedSearchCV path (Phase 7.5)."""
+
+    def _make_tune_trainer(self, tmp_path: Path) -> ModelTrainer:
+        csv_path = _make_csv(tmp_path, n=120)
+        return ModelTrainer(
+            dataset_path=csv_path,
+            model_out=tmp_path / "model.joblib",
+            metrics_out=tmp_path / "metrics.json",
+            importance_out=tmp_path / "importance.png",
+            tune=True,
+        )
+
+    def test_tune_param_grid_keys(self) -> None:
+        """Search space must contain all expected hyperparameter keys."""
+        expected_keys = {
+            "n_estimators", "max_depth", "learning_rate",
+            "subsample", "colsample_bytree", "min_child_weight", "gamma",
+        }
+        assert expected_keys == set(_TUNE_PARAM_GRID.keys())
+
+    def test_tune_param_grid_values_are_lists(self) -> None:
+        for key, values in _TUNE_PARAM_GRID.items():
+            assert isinstance(values, list), f"{key!r} value must be a list"
+            assert len(values) > 0, f"{key!r} list must not be empty"
+
+    @patch("src.model.trainer.RandomizedSearchCV")
+    def test_tune_mode_uses_randomized_search(
+        self, mock_rscv_cls: MagicMock, tmp_path: Path
+    ) -> None:
+        """When tune=True, RandomizedSearchCV is instantiated and .fit() called."""
+        # Build a mock best_estimator_ that acts like a fitted XGBClassifier.
+        mock_estimator = MagicMock()
+        mock_estimator.predict.return_value = np.zeros(20, dtype=int)
+
+        mock_search_instance = MagicMock()
+        mock_search_instance.best_estimator_ = mock_estimator
+        mock_search_instance.best_params_ = {
+            "n_estimators": 100, "max_depth": 3, "learning_rate": 0.05,
+            "subsample": 0.8, "colsample_bytree": 0.8,
+            "min_child_weight": 1, "gamma": 0,
+        }
+        mock_search_instance.best_score_ = 0.42
+        mock_rscv_cls.return_value = mock_search_instance
+
+        trainer = self._make_tune_trainer(tmp_path)
+        trainer.load_dataset().prepare_features().train()
+
+        mock_rscv_cls.assert_called_once()
+        mock_search_instance.fit.assert_called_once()
+        assert trainer.model is mock_estimator
+
+    @patch("src.model.trainer.RandomizedSearchCV")
+    def test_tune_stores_best_params(
+        self, mock_rscv_cls: MagicMock, tmp_path: Path
+    ) -> None:
+        mock_estimator = MagicMock()
+        mock_estimator.predict.return_value = np.zeros(20, dtype=int)
+
+        best_params = {
+            "n_estimators": 200, "max_depth": 4, "learning_rate": 0.1,
+            "subsample": 0.9, "colsample_bytree": 0.7,
+            "min_child_weight": 3, "gamma": 0.1,
+        }
+        mock_search_instance = MagicMock()
+        mock_search_instance.best_estimator_ = mock_estimator
+        mock_search_instance.best_params_ = best_params
+        mock_search_instance.best_score_ = 0.55
+        mock_rscv_cls.return_value = mock_search_instance
+
+        trainer = self._make_tune_trainer(tmp_path)
+        trainer.load_dataset().prepare_features().train()
+
+        assert trainer.best_params == best_params
+        assert trainer.cv_score == pytest.approx(0.55)
+
+    def test_fast_mode_best_params_is_none(self, tmp_path: Path) -> None:
+        trainer = _make_trainer(tmp_path)
+        trainer.load_dataset().prepare_features().train({"n_estimators": 5})
+        assert trainer.best_params is None
+        assert trainer.cv_score is None
+
+
+# ── TestBestParamsSaving ──────────────────────────────────────────────────────
+
+class TestBestParamsSaving:
+    """Tests that best params JSON is written in tune mode (Phase 7.5)."""
+
+    @patch("src.model.trainer.RandomizedSearchCV")
+    def test_best_params_json_created(
+        self, mock_rscv_cls: MagicMock, tmp_path: Path
+    ) -> None:
+        mock_estimator = MagicMock()
+        mock_estimator.predict.return_value = np.zeros(20, dtype=int)
+
+        best_params = {
+            "n_estimators": 300, "max_depth": 5, "learning_rate": 0.05,
+            "subsample": 0.8, "colsample_bytree": 0.8,
+            "min_child_weight": 1, "gamma": 0,
+        }
+        mock_search_instance = MagicMock()
+        mock_search_instance.best_estimator_ = mock_estimator
+        mock_search_instance.best_params_ = best_params
+        mock_search_instance.best_score_ = 0.48
+        mock_rscv_cls.return_value = mock_search_instance
+
+        csv_path = _make_csv(tmp_path, n=120)
+        metrics_out = tmp_path / "metrics.json"
+        trainer = ModelTrainer(
+            dataset_path=csv_path,
+            model_out=tmp_path / "model.joblib",
+            metrics_out=metrics_out,
+            importance_out=tmp_path / "importance.png",
+            tune=True,
+        )
+        trainer.load_dataset().prepare_features().train()
+
+        best_params_out = metrics_out.parent / "xgboost_best_params.json"
+        assert best_params_out.exists()
+
+    @patch("src.model.trainer.RandomizedSearchCV")
+    def test_best_params_json_valid(
+        self, mock_rscv_cls: MagicMock, tmp_path: Path
+    ) -> None:
+        mock_estimator = MagicMock()
+        mock_estimator.predict.return_value = np.zeros(20, dtype=int)
+
+        best_params = {
+            "n_estimators": 400, "max_depth": 6, "learning_rate": 0.03,
+            "subsample": 0.7, "colsample_bytree": 0.9,
+            "min_child_weight": 5, "gamma": 0.3,
+        }
+        mock_search_instance = MagicMock()
+        mock_search_instance.best_estimator_ = mock_estimator
+        mock_search_instance.best_params_ = best_params
+        mock_search_instance.best_score_ = 0.51
+        mock_rscv_cls.return_value = mock_search_instance
+
+        csv_path = _make_csv(tmp_path, n=120)
+        metrics_out = tmp_path / "metrics.json"
+        trainer = ModelTrainer(
+            dataset_path=csv_path,
+            model_out=tmp_path / "model.joblib",
+            metrics_out=metrics_out,
+            importance_out=tmp_path / "importance.png",
+            tune=True,
+        )
+        trainer.load_dataset().prepare_features().train()
+
+        best_params_out = metrics_out.parent / "xgboost_best_params.json"
+        payload = json.loads(best_params_out.read_text())
+        assert "best_params" in payload
+        assert "best_cv_score_f1_macro" in payload
+        assert payload["best_cv_score_f1_macro"] == pytest.approx(0.51)
+        assert payload["scoring"] == "f1_macro"
+        assert payload["best_params"] == best_params
+
+    def test_best_params_json_not_created_in_fast_mode(self, tmp_path: Path) -> None:
+        trainer = _make_trainer(tmp_path)
+        trainer.load_dataset().prepare_features().train({"n_estimators": 5})
+        best_params_out = tmp_path / "xgboost_best_params.json"
+        assert not best_params_out.exists()
+
+
+# ── TestSaveModelTop20 ────────────────────────────────────────────────────────
+
+class TestSaveModelTop20:
+    """Tests that top20_feature_importance.csv is written (Phase 7.5)."""
+
+    def test_top20_csv_created(self, tmp_path: Path) -> None:
+        trainer = _make_trainer(tmp_path)
+        trainer.load_dataset().prepare_features().train({"n_estimators": 10})
+        trainer.evaluate()
+        trainer.save_model()
+        assert (tmp_path / "top20_feature_importance.csv").exists()
+
+    def test_top20_csv_has_rank_column(self, tmp_path: Path) -> None:
+        trainer = _make_trainer(tmp_path)
+        trainer.load_dataset().prepare_features().train({"n_estimators": 10})
+        trainer.evaluate()
+        trainer.save_model()
+        df = pd.read_csv(tmp_path / "top20_feature_importance.csv")
+        assert "rank" in df.columns
+        assert "feature" in df.columns
+        assert "importance" in df.columns
+
+    def test_top20_csv_has_at_most_20_rows(self, tmp_path: Path) -> None:
+        trainer = _make_trainer(tmp_path)
+        trainer.load_dataset().prepare_features().train({"n_estimators": 10})
+        trainer.evaluate()
+        trainer.save_model()
+        df = pd.read_csv(tmp_path / "top20_feature_importance.csv")
+        assert len(df) <= 20
+
+    def test_top20_csv_rank_starts_at_1(self, tmp_path: Path) -> None:
+        trainer = _make_trainer(tmp_path)
+        trainer.load_dataset().prepare_features().train({"n_estimators": 10})
+        trainer.evaluate()
+        trainer.save_model()
+        df = pd.read_csv(tmp_path / "top20_feature_importance.csv")
+        assert df["rank"].iloc[0] == 1

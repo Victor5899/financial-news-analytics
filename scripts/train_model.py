@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-Phase 7 entry-point: train an XGBoost stock direction classifier.
+Phase 7.5 entry-point: train an XGBoost stock direction classifier.
 
 Loads a Phase 6 ML dataset, engineers features, trains a three-class
-XGBoost classifier (BUY / HOLD / SELL), evaluates on a held-out test
-split, and writes the model artifact + evaluation metrics + feature
-importance to ``artifacts/``.
+XGBoost classifier (BUY / HOLD / SELL) using a chronological
+TimeSeriesSplit, evaluates on the held-out test split, and writes the model
+artifact + evaluation metrics + feature importance to ``artifacts/``.
+
+Optionally runs RandomizedSearchCV to find the best hyperparameters before
+fitting the final model (``--tune`` flag).
 
 Run from the project root
 -------------------------
@@ -13,17 +16,22 @@ Run from the project root
     python scripts/train_model.py
 
     # Explicit dataset path
-    python scripts/train_model.py \
+    python scripts/train_model.py \\
         --dataset data/ml/ml_dataset_2025-01-01_2026-06-17.csv
 
     # Custom artifact paths
-    python scripts/train_model.py \
-        --model-out   artifacts/models/my_model.joblib \
-        --metrics-out artifacts/metrics/my_metrics.json \
+    python scripts/train_model.py \\
+        --model-out   artifacts/models/my_model.joblib \\
+        --metrics-out artifacts/metrics/my_metrics.json \\
         --importance-out artifacts/plots/my_importance.png
 
     # Change random seed
     python scripts/train_model.py --random-seed 123
+
+    # Run RandomizedSearchCV hyperparameter tuning (slower but may improve F1)
+    python scripts/train_model.py \\
+        --dataset data/ml/ml_dataset_2025-01-02_2026-06-17.csv \\
+        --tune
 
     # Dry-run: print configuration and exit without training
     python scripts/train_model.py --dry-run
@@ -32,8 +40,10 @@ Output
 ------
     artifacts/models/xgboost_direction_model.joblib
     artifacts/metrics/xgboost_metrics.json
+    artifacts/metrics/xgboost_best_params.json  (tune mode only)
     artifacts/plots/feature_importance.png
     artifacts/plots/feature_importance.csv
+    artifacts/plots/top20_feature_importance.csv
 """
 
 from __future__ import annotations
@@ -77,23 +87,27 @@ def _find_latest_dataset(ml_dir: Path) -> Path | None:
 
 
 def _print_summary(trainer: ModelTrainer, model_out: Path) -> None:
-    """Print a structured Phase 7 training summary to stdout."""
+    """Print a structured Phase 7.5 training summary to stdout."""
     m = trainer.metrics
     if m is None:
         return
 
     print("\n" + "=" * 60)
-    print("  Phase 7: XGBoost Model Training")
+    print("  Phase 7.5: XGBoost Model Training")
     print("=" * 60)
-    print(f"  Dataset rows    : {trainer.n_total}")
-    print(f"  Feature columns : {len(trainer.feature_columns)}")
-    print(f"  Train rows      : {trainer.n_train}")
-    print(f"  Test rows       : {trainer.n_test}")
-    print(f"  Accuracy        : {m['accuracy']:.4f}")
-    print(f"  Macro F1        : {m['f1']['macro']:.4f}")
-    print(f"  Macro Precision : {m['precision']['macro']:.4f}")
-    print(f"  Macro Recall    : {m['recall']['macro']:.4f}")
-    print(f"  Model saved     : {model_out}")
+    print(f"  Dataset rows      : {trainer.n_total}")
+    print(f"  Feature columns   : {len(trainer.feature_columns)}")
+    print(f"  Train rows        : {trainer.n_train}")
+    print(f"  Test rows         : {trainer.n_test}")
+    print(f"  Accuracy          : {m['accuracy']:.4f}")
+    print(f"  Balanced Accuracy : {m['balanced_accuracy']:.4f}")
+    print(f"  MCC               : {m['mcc']:.4f}")
+    print(f"  Macro F1          : {m['f1']['macro']:.4f}")
+    print(f"  Macro Precision   : {m['precision']['macro']:.4f}")
+    print(f"  Macro Recall      : {m['recall']['macro']:.4f}")
+    if trainer.cv_score is not None:
+        print(f"  Best CV F1 Macro  : {trainer.cv_score:.4f}")
+    print(f"  Model saved       : {model_out}")
     print("=" * 60)
     print()
     print(m["classification_report"])
@@ -108,12 +122,18 @@ def _print_summary(trainer: ModelTrainer, model_out: Path) -> None:
         print(f"  {labels[i]:<6}{cells}")
     print()
 
+    if trainer.best_params:
+        print("  Best hyperparameters (RandomizedSearchCV):")
+        for k, v in sorted(trainer.best_params.items()):
+            print(f"    {k:<20} : {v}")
+        print()
+
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train XGBoost stock direction classifier (Phase 7).",
+        description="Train XGBoost stock direction classifier (Phase 7.5).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -155,6 +175,24 @@ def _parse_args() -> argparse.Namespace:
         help="Random seed for the train/test split and XGBoost",
     )
     parser.add_argument(
+        "--n-splits",
+        type=int,
+        default=5,
+        metavar="N",
+        dest="n_splits",
+        help="Number of folds for TimeSeriesSplit (last fold is held-out test set)",
+    )
+    parser.add_argument(
+        "--tune",
+        action="store_true",
+        default=False,
+        help=(
+            "Run RandomizedSearchCV over the XGBoost hyperparameter grid before "
+            "fitting the final model.  Slower but may improve F1.  "
+            "Best parameters are saved to artifacts/metrics/xgboost_best_params.json."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         default=settings.log_level,
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -191,13 +229,15 @@ def main() -> None:
             sys.exit(1)
 
     logger.info("=" * 60)
-    logger.info("financial-news-analytics | Phase 7: XGBoost Training")
+    logger.info("financial-news-analytics | Phase 7.5: XGBoost Training")
     logger.info("=" * 60)
     logger.info(f"  Dataset        : {dataset_path}")
     logger.info(f"  Model out      : {model_out}")
     logger.info(f"  Metrics out    : {metrics_out}")
     logger.info(f"  Importance out : {importance_out}")
     logger.info(f"  Random seed    : {args.random_seed}")
+    logger.info(f"  n_splits       : {args.n_splits}")
+    logger.info(f"  Tune           : {args.tune}")
     logger.info(f"  Dry-run        : {args.dry_run}")
 
     if args.dry_run:
@@ -210,6 +250,8 @@ def main() -> None:
         metrics_out=metrics_out,
         importance_out=importance_out,
         random_seed=args.random_seed,
+        n_splits=args.n_splits,
+        tune=args.tune,
     )
 
     try:

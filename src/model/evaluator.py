@@ -1,5 +1,5 @@
 """
-Phase 7: Model evaluator — orchestrates metric computation, logging, and persistence.
+Phase 7 / 7.5: Model evaluator — orchestrates metric computation, logging, and persistence.
 
 ``ModelEvaluator`` wraps the lower-level :mod:`~src.model.metrics` functions
 into a stateful object that mirrors the orchestration style used elsewhere in
@@ -94,10 +94,13 @@ class ModelEvaluator:
         """
         if self._metrics is None:
             raise RuntimeError("Call evaluate() before log_summary().")
-        logger.info(f"  Accuracy   : {self._metrics['accuracy']:.4f}")
-        logger.info(f"  Macro F1   : {self._metrics['f1']['macro']:.4f}")
-        logger.info(f"  Macro Prec : {self._metrics['precision']['macro']:.4f}")
-        logger.info(f"  Macro Rec  : {self._metrics['recall']['macro']:.4f}")
+        logger.info(f"  Accuracy          : {self._metrics['accuracy']:.4f}")
+        logger.info(f"  Balanced Accuracy : {self._metrics['balanced_accuracy']:.4f}")
+        logger.info(f"  MCC               : {self._metrics['mcc']:.4f}")
+        logger.info(f"  Macro F1          : {self._metrics['f1']['macro']:.4f}")
+        logger.info(f"  Macro Precision   : {self._metrics['precision']['macro']:.4f}")
+        logger.info(f"  Macro Recall      : {self._metrics['recall']['macro']:.4f}")
+        logger.info("Evaluation complete.")
 
     # ── Properties ────────────────────────────────────────────────────────────
 

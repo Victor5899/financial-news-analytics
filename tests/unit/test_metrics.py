@@ -5,14 +5,16 @@ All tests use small in-memory arrays.  No model, no filesystem, no DB.
 
 Test organisation
 -----------------
-TestComputeAccuracy          — basic accuracy formula correctness
-TestComputePrecision         — macro and per-class precision structure
-TestComputeRecall            — macro and per-class recall structure
-TestComputeF1                — macro and per-class F1 structure
+TestComputeAccuracy             — basic accuracy formula correctness
+TestComputeBalancedAccuracy     — balanced accuracy (Phase 7.5)
+TestComputeMCC                  — Matthews Correlation Coefficient (Phase 7.5)
+TestComputePrecision            — macro and per-class precision structure
+TestComputeRecall               — macro and per-class recall structure
+TestComputeF1                   — macro and per-class F1 structure
 TestComputeClassificationReport — report is a non-empty string
-TestComputeConfusionMatrix   — shape and value correctness
-TestComputeAllMetrics        — aggregate helper, all keys present
-TestSaveMetrics              — JSON file creation and deserialisation
+TestComputeConfusionMatrix      — shape and value correctness
+TestComputeAllMetrics           — aggregate helper, all keys present
+TestSaveMetrics                 — JSON file creation and deserialisation
 """
 
 from __future__ import annotations
@@ -26,9 +28,11 @@ import pytest
 from src.model.metrics import (
     compute_accuracy,
     compute_all_metrics,
+    compute_balanced_accuracy,
     compute_classification_report,
     compute_confusion_matrix,
     compute_f1,
+    compute_mcc,
     compute_precision,
     compute_recall,
     save_metrics,
@@ -80,6 +84,68 @@ class TestComputeAccuracy:
         y_true = np.array(["BUY",  "HOLD", "SELL"])
         y_pred = np.array(["SELL", "BUY",  "HOLD"])
         assert compute_accuracy(y_true, y_pred) == pytest.approx(0.0)
+
+
+# ── TestComputeBalancedAccuracy ───────────────────────────────────────────────
+
+class TestComputeBalancedAccuracy:
+    def test_perfect_balanced_accuracy(
+        self, perfect_predictions: tuple[np.ndarray, np.ndarray]
+    ) -> None:
+        y_true, y_pred = perfect_predictions
+        assert compute_balanced_accuracy(y_true, y_pred) == pytest.approx(1.0)
+
+    def test_partial_balanced_accuracy(
+        self, mixed_predictions: tuple[np.ndarray, np.ndarray]
+    ) -> None:
+        y_true, y_pred = mixed_predictions
+        ba = compute_balanced_accuracy(y_true, y_pred)
+        assert 0.0 <= ba <= 1.0
+
+    def test_returns_python_float(
+        self, perfect_predictions: tuple[np.ndarray, np.ndarray]
+    ) -> None:
+        y_true, y_pred = perfect_predictions
+        assert isinstance(compute_balanced_accuracy(y_true, y_pred), float)
+
+    def test_differs_from_accuracy_on_imbalanced(self) -> None:
+        # 8 BUY, 1 HOLD, 1 SELL — predicting all BUY gives high accuracy but low balanced acc.
+        y_true = np.array(["BUY"] * 8 + ["HOLD", "SELL"])
+        y_pred = np.array(["BUY"] * 10)
+        acc = float(sum(a == b for a, b in zip(y_true, y_pred)) / len(y_true))
+        ba = compute_balanced_accuracy(y_true, y_pred)
+        # Balanced accuracy penalises misclassified minority classes.
+        assert ba < acc
+
+
+# ── TestComputeMCC ────────────────────────────────────────────────────────────
+
+class TestComputeMCC:
+    def test_perfect_mcc(
+        self, perfect_predictions: tuple[np.ndarray, np.ndarray]
+    ) -> None:
+        y_true, y_pred = perfect_predictions
+        assert compute_mcc(y_true, y_pred) == pytest.approx(1.0)
+
+    def test_mcc_range(
+        self, mixed_predictions: tuple[np.ndarray, np.ndarray]
+    ) -> None:
+        y_true, y_pred = mixed_predictions
+        mcc = compute_mcc(y_true, y_pred)
+        assert -1.0 <= mcc <= 1.0
+
+    def test_returns_python_float(
+        self, perfect_predictions: tuple[np.ndarray, np.ndarray]
+    ) -> None:
+        y_true, y_pred = perfect_predictions
+        assert isinstance(compute_mcc(y_true, y_pred), float)
+
+    def test_random_mcc_near_zero(self) -> None:
+        rng = np.random.default_rng(0)
+        y_true = rng.choice(["BUY", "HOLD", "SELL"], size=300)
+        y_pred = rng.choice(["BUY", "HOLD", "SELL"], size=300)
+        mcc = compute_mcc(y_true, y_pred)
+        assert abs(mcc) < 0.3  # random predictions should score near zero
 
 
 # ── TestComputePrecision ──────────────────────────────────────────────────────
@@ -225,6 +291,8 @@ class TestComputeConfusionMatrix:
 class TestComputeAllMetrics:
     _REQUIRED_KEYS = {
         "accuracy",
+        "balanced_accuracy",
+        "mcc",
         "precision",
         "recall",
         "f1",
@@ -254,6 +322,24 @@ class TestComputeAllMetrics:
         result = compute_all_metrics(y_true, y_pred, _LABELS)
         assert result["accuracy"] == pytest.approx(
             compute_accuracy(y_true, y_pred)
+        )
+
+    def test_balanced_accuracy_consistent_with_individual(
+        self, mixed_predictions: tuple[np.ndarray, np.ndarray]
+    ) -> None:
+        y_true, y_pred = mixed_predictions
+        result = compute_all_metrics(y_true, y_pred, _LABELS)
+        assert result["balanced_accuracy"] == pytest.approx(
+            compute_balanced_accuracy(y_true, y_pred)
+        )
+
+    def test_mcc_consistent_with_individual(
+        self, mixed_predictions: tuple[np.ndarray, np.ndarray]
+    ) -> None:
+        y_true, y_pred = mixed_predictions
+        result = compute_all_metrics(y_true, y_pred, _LABELS)
+        assert result["mcc"] == pytest.approx(
+            compute_mcc(y_true, y_pred)
         )
 
     def test_json_serialisable(

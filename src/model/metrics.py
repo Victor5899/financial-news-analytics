@@ -1,8 +1,10 @@
 """
-Phase 7: Classification metric computation for the XGBoost direction model.
+Phase 7 / 7.5: Classification metric computation for the XGBoost direction model.
 
 All public functions accept plain Python/NumPy arrays and return JSON-safe
 Python primitives so that metric dicts can be serialised directly to disk.
+
+Phase 7.5 additions: balanced_accuracy and matthews_corrcoef.
 
 Usage
 -----
@@ -22,9 +24,11 @@ from typing import Any
 import numpy as np
 from sklearn.metrics import (
     accuracy_score,
+    balanced_accuracy_score,
     classification_report,
     confusion_matrix,
     f1_score,
+    matthews_corrcoef,
     precision_score,
     recall_score,
 )
@@ -181,6 +185,55 @@ def compute_confusion_matrix(
     return confusion_matrix(y_true, y_pred).tolist()
 
 
+def compute_balanced_accuracy(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+) -> float:
+    """Return balanced accuracy (macro-averaged recall) as a plain Python float.
+
+    Balanced accuracy is the average of per-class recall rates, which is more
+    informative than raw accuracy on imbalanced class distributions.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Ground-truth labels.
+    y_pred : array-like
+        Model predictions.
+
+    Returns
+    -------
+    float
+        Balanced accuracy in [0, 1].
+    """
+    return float(balanced_accuracy_score(y_true, y_pred))
+
+
+def compute_mcc(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+) -> float:
+    """Return the Matthews Correlation Coefficient as a plain Python float.
+
+    MCC is a balanced quality measure for multi-class classification that
+    accounts for all four confusion matrix quadrants.  Values range from
+    -1 (worst) through 0 (random) to +1 (perfect).
+
+    Parameters
+    ----------
+    y_true : array-like
+        Ground-truth labels.
+    y_pred : array-like
+        Model predictions.
+
+    Returns
+    -------
+    float
+        MCC in [-1, 1].
+    """
+    return float(matthews_corrcoef(y_true, y_pred))
+
+
 # ── Aggregate helper ──────────────────────────────────────────────────────────
 
 def compute_all_metrics(
@@ -204,11 +257,14 @@ def compute_all_metrics(
     Returns
     -------
     dict
-        Keys: ``accuracy``, ``precision``, ``recall``, ``f1``,
+        Keys: ``accuracy``, ``balanced_accuracy``, ``mcc``,
+        ``precision``, ``recall``, ``f1``,
         ``classification_report``, ``confusion_matrix``, ``labels``.
     """
     return {
         "accuracy":               compute_accuracy(y_true, y_pred),
+        "balanced_accuracy":      compute_balanced_accuracy(y_true, y_pred),
+        "mcc":                    compute_mcc(y_true, y_pred),
         "precision":              compute_precision(y_true, y_pred, labels),
         "recall":                 compute_recall(y_true, y_pred, labels),
         "f1":                     compute_f1(y_true, y_pred, labels),

@@ -1,5 +1,5 @@
 """
-Phase 7: Feature importance computation and visualisation for XGBoost models.
+Phase 7 / 7.5: Feature importance computation and visualisation for XGBoost models.
 
 Extracts per-feature importance scores from a trained XGBClassifier and
 produces both a ranked CSV and a horizontal bar-chart PNG.
@@ -142,3 +142,26 @@ def save_importance_csv(importance_df: pd.DataFrame, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     importance_df.to_csv(out_path, index=False)
     logger.info(f"Feature importance CSV saved → {out_path}")
+
+
+def save_top_n_importance_csv(
+    importance_df: pd.DataFrame,
+    out_path: Path,
+    top_n: int = _TOP_N_DEFAULT,
+) -> None:
+    """Save the top N most important features to a CSV file.
+
+    Parameters
+    ----------
+    importance_df : pd.DataFrame
+        Output of :func:`compute_feature_importance` (sorted descending).
+    out_path : Path
+        Destination CSV file.  Parent directories are created automatically.
+    top_n : int
+        Maximum number of top features to include.  Default is 20.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    top = importance_df.head(top_n).copy()
+    top.insert(0, "rank", range(1, len(top) + 1))
+    top.to_csv(out_path, index=False)
+    logger.info(f"Top-{top_n} feature importance CSV saved → {out_path}")
