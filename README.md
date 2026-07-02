@@ -307,20 +307,35 @@ Output: `data/processed/<TICKER>_sentiment_<tag>.csv`
 
 ### 5. Run Phase 3 — Load to PostgreSQL
 
+Three mutually exclusive input modes are supported:
+
 ```bash
+# Default — load all processed CSVs for today (real-time pipeline)
 python scripts/load_to_db.py --create-tables
+
+# Single file — load exactly one CSV (ticker inferred from filename)
+python scripts/load_to_db.py \
+    --input-file data/processed/AAPL_sentiment_2023.csv
+
+# Directory scan — load every valid sentiment CSV in a directory (historical backfill)
+python scripts/load_to_db.py \
+    --input-dir data/processed
 ```
 
 Options:
 
-| Flag                            | Default            | Description                                     |
-| ------------------------------- | ------------------ | ----------------------------------------------- |
-| `--tickers AAPL TSLA`           | all CSVs for today | Tickers to load                                 |
-| `--date 2026-06-16`             | today              | Date tag of processed CSVs                      |
-| `--model-name ProsusAI/finbert` | from `.env`        | Model name stored in DB                         |
-| `--create-tables`               | —                  | Run `CREATE TABLE IF NOT EXISTS` before loading |
-| `--log-level INFO`              | from `.env`        | Verbosity                                       |
-| `--dry-run`                     | —                  | Print config and exit                           |
+| Flag                            | Default            | Description                                                        |
+| ------------------------------- | ------------------ | ------------------------------------------------------------------ |
+| `--tickers AAPL TSLA`           | all CSVs for today | Tickers to load (default mode only)                                |
+| `--date 2026-06-16`             | today              | Date tag of processed CSVs (default mode only)                     |
+| `--input-file PATH`             | —                  | Load a single CSV; ticker inferred from `<TICKER>_sentiment_*.csv` |
+| `--input-dir PATH`              | —                  | Scan a directory for all sentiment CSVs (alphabetical order)       |
+| `--model-name ProsusAI/finbert` | from `.env`        | Model name stored in DB                                            |
+| `--create-tables`               | —                  | Run `CREATE TABLE IF NOT EXISTS` before loading                    |
+| `--log-level INFO`              | from `.env`        | Verbosity                                                          |
+| `--dry-run`                     | —                  | Print config and exit                                              |
+
+`--input-file` and `--input-dir` are mutually exclusive.  When using `--input-dir`, a per-file progress line is printed and a final **Historical Load Summary** is displayed showing files processed, succeeded, failed, and total rows loaded.
 
 Output: rows upserted into `news_articles` and `sentiment_results` tables.
 
