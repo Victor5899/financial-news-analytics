@@ -36,6 +36,7 @@ Output column order
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -213,6 +214,35 @@ def _compute_direction_label(return_5d: float | None) -> str | None:
     if return_5d < SELL_THRESHOLD:
         return "SELL"
     return "HOLD"
+
+
+def _find_next_trading_date(
+    target_date: date,
+    sorted_dates: list[date],
+) -> date | None:
+    """
+    Return ``target_date`` if it is a trading day, otherwise the first
+    trading day strictly after it.
+
+    Uses :func:`bisect.bisect_left` for O(log n) lookup.
+
+    Parameters
+    ----------
+    target_date : date
+        The calendar date to anchor on (may be a weekend or market holiday).
+    sorted_dates : list[date]
+        Ascending list of trading dates for the ticker.
+
+    Returns
+    -------
+    date | None
+        The effective trading date, or ``None`` when no trading day exists
+        at or after ``target_date`` (end-of-history case).
+    """
+    idx = bisect_left(sorted_dates, target_date)
+    if idx < len(sorted_dates):
+        return sorted_dates[idx]
+    return None
 
 
 # ── MLDatasetBuilder ──────────────────────────────────────────────────────────
@@ -477,16 +507,23 @@ class MLDatasetBuilder:
             pm = price_index.get(ticker, {})
             sorted_dates = sorted_dates_index.get(ticker, [])
 
-            close_today = pm.get(target_date)
-            if close_today is None:
+            effective_date = _find_next_trading_date(target_date, sorted_dates)
+            if effective_date is None:
                 logger.warning(
-                    f"[{ticker}] No close price for {target_date} "
+                    f"[{ticker}] No trading day found on or after {target_date} "
                     "— skipping label generation for this row"
                 )
                 skipped_count += 1
                 continue
 
-            future_closes = _compute_future_closes(ticker, target_date, pm, sorted_dates)
+            if effective_date != target_date:
+                logger.debug(
+                    f"[{ticker}] Weekend/holiday alignment: "
+                    f"{target_date} -> {effective_date}"
+                )
+
+            close_today = pm[effective_date]
+            future_closes = _compute_future_closes(ticker, effective_date, pm, sorted_dates)
 
             missing_closes = [k for k, v in future_closes.items() if v is None]
             if missing_closes:

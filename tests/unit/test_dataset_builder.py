@@ -48,6 +48,7 @@ from src.ml.dataset_builder import (
     _compute_direction_label,
     _compute_future_closes,
     _compute_returns,
+    _find_next_trading_date,
 )
 from src.storage.models import Base, StockPrice
 
@@ -177,6 +178,62 @@ def _make_features_df(
         "positive_ratio": 0.6,
         "mean_sentiment_score": 0.4,
     }])
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TestFindNextTradingDate  (Phase 6.1 — weekend / holiday alignment)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestFindNextTradingDate:
+    """Unit tests for the _find_next_trading_date O(log n) helper."""
+
+    # Trading calendar: Mon 2026-01-05 … Fri 2026-01-09, then Mon 2026-01-12
+    # (Jan 10 = Saturday, Jan 11 = Sunday are absent as expected)
+    _TRADING_DATES: list[date] = [
+        date(2026, 1, 5),   # Monday
+        date(2026, 1, 6),   # Tuesday
+        date(2026, 1, 7),   # Wednesday
+        date(2026, 1, 8),   # Thursday
+        date(2026, 1, 9),   # Friday
+        date(2026, 1, 12),  # Monday  (weekend skipped)
+    ]
+
+    def test_exact_trading_day_returns_same_day(self) -> None:
+        result = _find_next_trading_date(date(2026, 1, 6), self._TRADING_DATES)
+        assert result == date(2026, 1, 6)
+
+    def test_saturday_maps_to_following_monday(self) -> None:
+        # Jan 10 is Saturday; next trading day is Monday Jan 12
+        result = _find_next_trading_date(date(2026, 1, 10), self._TRADING_DATES)
+        assert result == date(2026, 1, 12)
+
+    def test_sunday_maps_to_following_monday(self) -> None:
+        # Jan 11 is Sunday; next trading day is Monday Jan 12
+        result = _find_next_trading_date(date(2026, 1, 11), self._TRADING_DATES)
+        assert result == date(2026, 1, 12)
+
+    def test_holiday_maps_to_next_trading_day(self) -> None:
+        # Jan 1 is a holiday; first trading day is Jan 2
+        sd = [date(2026, 1, 2), date(2026, 1, 5), date(2026, 1, 6)]
+        result = _find_next_trading_date(date(2026, 1, 1), sd)
+        assert result == date(2026, 1, 2)
+
+    def test_date_after_last_entry_returns_none(self) -> None:
+        # Jan 13 is after the last trading day (Jan 12) → end-of-history
+        result = _find_next_trading_date(date(2026, 1, 13), self._TRADING_DATES)
+        assert result is None
+
+    def test_empty_sorted_dates_returns_none(self) -> None:
+        result = _find_next_trading_date(date(2026, 1, 6), [])
+        assert result is None
+
+    def test_first_date_in_list_is_returned_for_earlier_target(self) -> None:
+        result = _find_next_trading_date(date(2026, 1, 1), self._TRADING_DATES)
+        assert result == date(2026, 1, 5)
+
+    def test_last_date_in_list_is_returned_exactly(self) -> None:
+        result = _find_next_trading_date(date(2026, 1, 12), self._TRADING_DATES)
+        assert result == date(2026, 1, 12)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -625,12 +682,16 @@ class TestGenerateLabels:
         with pytest.raises(LabelGenerationError):
             simple_builder.generate_labels(_make_features_df(), pd.DataFrame())
 
-    def test_missing_current_price_raises_no_labeled_rows(
+    def test_weekend_date_aligned_to_next_trading_day(
         self, simple_builder: MLDatasetBuilder
     ) -> None:
-        feat = _make_features_df(target_date=date(2020, 1, 1))  # date not in prices
-        with pytest.raises(LabelGenerationError, match="No labeled rows"):
-            simple_builder.generate_labels(feat, _make_prices_df())
+        # Phase 6.1: a feature date before the first available trading day is
+        # aligned to that first trading day rather than skipped.
+        feat = _make_features_df(target_date=date(2020, 1, 1))
+        result = simple_builder.generate_labels(feat, _make_prices_df())
+        assert len(result) == 1
+        # Original feature date is preserved in the output row
+        assert result["date"].iloc[0] == date(2020, 1, 1)
 
     def test_insufficient_future_days_produces_partial_labels(
         self, simple_builder: MLDatasetBuilder
@@ -672,6 +733,47 @@ class TestGenerateLabels:
         )
         for col in ["future_close_1d", "future_close_3d", "future_close_5d", "future_close_7d"]:
             assert pd.notna(result[col].iloc[0])
+
+    def test_saturday_feature_date_produces_labels(
+        self, simple_builder: MLDatasetBuilder
+    ) -> None:
+        # Build prices with Mon 2026-01-05 as the first trading day
+        prices = pd.DataFrame([
+            {"ticker": "AAPL", "trading_date": date(2026, 1, 5) + timedelta(days=i), "close_price": 100.0 + i}
+            for i in range(10)
+        ])
+        # Feature row is for Saturday 2026-01-03; should align to Monday 2026-01-05
+        feat = _make_features_df(target_date=date(2026, 1, 3))
+        result = simple_builder.generate_labels(feat, prices)
+        assert len(result) == 1
+        # Original feature date preserved
+        assert result["date"].iloc[0] == date(2026, 1, 3)
+        # close_today is from the aligned Monday (100.0), 1d future is Tuesday (101.0)
+        assert result["return_1d"].iloc[0] == pytest.approx(0.01, rel=1e-5)
+
+    def test_sunday_feature_date_produces_labels(
+        self, simple_builder: MLDatasetBuilder
+    ) -> None:
+        prices = pd.DataFrame([
+            {"ticker": "AAPL", "trading_date": date(2026, 1, 5) + timedelta(days=i), "close_price": 200.0 + i}
+            for i in range(10)
+        ])
+        feat = _make_features_df(target_date=date(2026, 1, 4))  # Sunday
+        result = simple_builder.generate_labels(feat, prices)
+        assert len(result) == 1
+        assert result["date"].iloc[0] == date(2026, 1, 4)
+
+    def test_no_future_trading_day_skips_row(
+        self, simple_builder: MLDatasetBuilder
+    ) -> None:
+        # Feature date is AFTER the last trading day in the price map → skip
+        prices = pd.DataFrame([
+            {"ticker": "AAPL", "trading_date": date(2026, 1, 5) + timedelta(days=i), "close_price": 100.0 + i}
+            for i in range(5)
+        ])
+        feat = _make_features_df(target_date=date(2026, 1, 20))  # after all prices
+        with pytest.raises(LabelGenerationError, match="No labeled rows"):
+            simple_builder.generate_labels(feat, prices)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -782,14 +884,16 @@ class TestPartialFutureAvailability:
         assert len(loaded) == 1
         assert "label_direction" in loaded.columns
 
-    def test_only_current_close_missing_still_raises(
+    def test_date_before_all_prices_aligned_to_first_trading_day(
         self, simple_builder: MLDatasetBuilder
     ) -> None:
-        # Prices exist but not on the feature date — row skipped → no output
+        # Phase 6.1: feature date before all available prices is aligned to the
+        # first trading day in the price map rather than skipped.
         feat = _make_features_df(target_date=date(2020, 6, 1))
-        prices = _make_prices_df(n=15)  # starts 2026-01-02, not 2020
-        with pytest.raises(LabelGenerationError, match="No labeled rows"):
-            simple_builder.generate_labels(feat, prices)
+        prices = _make_prices_df(n=15)  # starts 2026-01-02
+        result = simple_builder.generate_labels(feat, prices)
+        assert len(result) == 1
+        assert result["date"].iloc[0] == date(2020, 6, 1)  # original date preserved
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1010,12 +1114,15 @@ class TestMissingDataHandling:
         with pytest.raises(LabelGenerationError, match="No labeled rows"):
             simple_builder.generate_labels(feat, prices)
 
-    def test_date_not_in_prices_skips_row(
+    def test_date_not_in_prices_aligned_to_next_trading_day(
         self, simple_builder: MLDatasetBuilder
     ) -> None:
+        # Phase 6.1: date(2020, 1, 1) is before all prices; it is aligned to
+        # the first available trading day (2026-01-02) rather than skipped.
         feat = pd.DataFrame([{"ticker": "AAPL", "date": date(2020, 1, 1)}])
-        with pytest.raises(LabelGenerationError, match="No labeled rows"):
-            simple_builder.generate_labels(feat, _make_prices_df())
+        result = simple_builder.generate_labels(feat, _make_prices_df())
+        assert len(result) == 1
+        assert result["date"].iloc[0] == date(2020, 1, 1)
 
     def test_7_rows_produces_null_7d_label(
         self, simple_builder: MLDatasetBuilder

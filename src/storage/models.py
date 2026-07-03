@@ -203,3 +203,46 @@ class StockPrice(Base):
             f"<StockPrice id={self.id} ticker={self.ticker!r} "
             f"date={self.trading_date} close={self.close_price}>"
         )
+
+
+# ── predictions ───────────────────────────────────────────────────────────────
+
+class Prediction(Base):
+    """
+    One row per live inference result (Phase 8).
+
+    Stores the output of the real-time prediction pipeline: direction label,
+    per-class probabilities, and the headline that triggered the prediction.
+    """
+
+    __tablename__ = "predictions"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    ticker:           Mapped[str]              = mapped_column(String(10),  nullable=False)
+    prediction:       Mapped[str]              = mapped_column(String(10),  nullable=False)
+    confidence:       Mapped[float]            = mapped_column(Float,        nullable=False)
+    buy_probability:  Mapped[float]            = mapped_column(Float,        nullable=False)
+    hold_probability: Mapped[float]            = mapped_column(Float,        nullable=False)
+    sell_probability: Mapped[float]            = mapped_column(Float,        nullable=False)
+    headline:         Mapped[str]              = mapped_column(Text,        nullable=False)
+    published_at:     Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_predictions_ticker",           "ticker"),
+        Index("ix_predictions_ticker_created",   "ticker", "created_at"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<Prediction id={self.id} ticker={self.ticker!r} "
+            f"prediction={self.prediction!r} confidence={self.confidence:.3f}>"
+        )

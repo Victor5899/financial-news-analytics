@@ -18,6 +18,7 @@ The pipeline has seven phases (plus an optimization phase):
 6. **ML dataset builder** — feature vectors are joined with future price movements to produce binary and multi-class labels across 1-, 3-, 5-, and 7-trading-day horizons.
 7. **Model training** — an [XGBoost](https://xgboost.readthedocs.io/) multi-class classifier is trained on the labelled dataset to predict BUY / HOLD / SELL signals, with a full evaluation suite and serialised model artifacts.
 8. **Model optimization** *(Phase 7.5)* — TimeSeriesSplit validation replaces the random split, optional `RandomizedSearchCV` finds the best hyperparameters, and the evaluation suite is extended with balanced accuracy, MCC, and per-class metrics.
+9. **Real-Time Prediction Engine** *(Phase 8)* — fetches the latest news from Finnhub, performs FinBERT sentiment analysis, generates the same 41 engineered features used during training, loads the trained XGBoost model, predicts BUY / HOLD / SELL, stores predictions in PostgreSQL, and supports live inference from the command line.
 
 | Phase     | Status      | Description                                                              |
 | --------- | ----------- | ------------------------------------------------------------------------ |
@@ -29,6 +30,7 @@ The pipeline has seven phases (plus an optimization phase):
 | Phase 6   | ✅ Complete | ML Dataset Builder — labelled supervised dataset → `data/ml/`           |
 | Phase 7   | ✅ Complete | XGBoost Model Training & Prediction → `artifacts/`                     |
 | Phase 7.5 | ✅ Complete | Model Optimization — TimeSeriesSplit + RandomizedSearchCV + richer metrics |
+| Phase 8   | ✅ Complete | Real-Time Prediction Engine → Live BUY / HOLD / SELL predictions stored in PostgreSQL |
 
 ---
 
@@ -78,7 +80,13 @@ The pipeline has seven phases (plus an optimization phase):
 - Self-contained model artifact (model + encoder + feature list) via joblib
 - Prediction API: CSV file, DataFrame, or single feature vector input
 - Structured logging throughout every phase
-- 898+ unit tests — no model download and no PostgreSQL instance required
+- Real-time prediction pipeline using the latest Finnhub news
+- Live BUY / HOLD / SELL inference using the trained XGBoost model
+- Prediction probabilities for all three classes
+- Prediction persistence in PostgreSQL
+- Shared feature engineering pipeline between training and live inference
+- Reuses the same 41 engineered features for production inference
+- 940+ unit tests — no model download and no PostgreSQL instance required
 
 ---
 
@@ -149,7 +157,8 @@ financial-news-analytics/
 │   ├── fetch_prices.py        # Phase 5: ingest stock prices from Yahoo Finance
 │   ├── build_ml_dataset.py    # Phase 6: build supervised ML dataset with labels
 │   ├── train_model.py         # Phase 7: train XGBoost classifier
-│   └── predict.py             # Phase 7: run inference with saved model
+│   ├── predict.py             # Phase 7: run inference with saved model
+│   └── predict_live.py        # Phase 8: real-time prediction
 │
 ├── src/
 │   ├── ingestion/
@@ -159,7 +168,7 @@ financial-news-analytics/
 │   │   └── sentiment_analyzer.py  # FinBERT sentiment pipeline
 │   ├── storage/
 │   │   ├── database.py            # Engine, session factory, DDL
-│   │   ├── models.py              # SQLAlchemy ORM models (incl. StockPrice)
+│   │   ├── models.py              # SQLAlchemy ORM models (NewsArticle, SentimentResult, StockPrice, Prediction)
 │   │   └── repository.py          # Upsert, bulk insert, queries
 │   ├── features/
 │   │   └── feature_engineer.py    # Phase 4: sentiment + technical indicator features
@@ -175,6 +184,10 @@ financial-news-analytics/
 │   │   ├── metrics.py             # Accuracy, precision, recall, F1, confusion matrix
 │   │   ├── model_io.py            # joblib save / load bundle
 │   │   └── feature_importance.py  # Top-20 bar chart + ranked CSV
+│   ├── realtime/
+│   │   ├── finnhub_client.py          # Phase 8: live Finnhub news client
+│   │   ├── realtime_pipeline.py       # Phase 8: end-to-end inference orchestration
+│   │   └── prediction_repository.py   # Phase 8: predictions table DB access layer
 │   └── utils/
 │       ├── config.py              # Pydantic settings (env-based)
 │       ├── logger.py              # Structured logging
@@ -429,7 +442,17 @@ python scripts/train_model.py --dry-run
 
 Output: model artifact, metrics JSON, and feature importance chart in `artifacts/`.
 
-### 10. Run predictions
+### 11. Run Phase 8 — Real-Time Prediction
+
+```bash
+python scripts/predict_live.py --ticker AAPL
+
+python scripts/predict_live.py --ticker TSLA
+```
+
+The script fetches the newest company news for the ticker, runs FinBERT sentiment analysis, generates live features using the same `FeatureEngineer` pipeline as training, loads the trained XGBoost model from `artifacts/models/xgboost_direction_model.joblib`, predicts BUY / HOLD / SELL with per-class probabilities, and stores the result in the PostgreSQL `predictions` table.
+
+### 12. Run predictions
 
 ```bash
 # Predict on a dataset CSV
@@ -494,9 +517,26 @@ Yahoo Finance ─────────────── Phase 5: fetch_price
                                          ▼
                                    artifacts/ (model + metrics + plots)
                                          │
-                                         │  predict.py
-                                         ▼
-                                   BUY / HOLD / SELL predictions
+Model ───────────────────────────────────┤
+                                         │
+                                         ├── predict.py (historical inference)
+                                         │
+                                         └── predict_live.py
+                                                 │
+                                                 ▼
+                                         Latest Finnhub News
+                                                 │
+                                                 ▼
+                                              FinBERT
+                                                 │
+                                                 ▼
+                                         Feature Engineering
+                                                 │
+                                                 ▼
+                                         BUY / HOLD / SELL Prediction
+                                                 │
+                                                 ▼
+                                         predictions table (PostgreSQL)
 ```
 
 ---
@@ -1057,6 +1097,69 @@ print(trainer.cv_score)      # float — best f1_macro from CV
 
 ---
 
+## Phase 8 — Real-Time Prediction Engine
+
+Phase 8 is an **inference-only** pipeline that produces live BUY / HOLD / SELL predictions from the latest Finnhub company news. It does not retrain the model — it loads the artifact saved by Phase 7 and reuses the same feature engineering code path as the batch pipeline.
+
+### Purpose
+
+Run on-demand predictions for a single ticker using fresh news, without waiting for a batch CSV or manual feature file. Results are persisted to PostgreSQL for downstream consumption (e.g. a future dashboard).
+
+### Architecture
+
+| Component | Module | Role |
+| --------- | ------ | ---- |
+| Finnhub client | `src/realtime/finnhub_client.py` | Fetch and normalise latest company news |
+| Sentiment | `src/processing/sentiment_analyzer.py` | FinBERT inference on the newest headline |
+| Features | `src/features/feature_engineer.py` | Same 41 features as training (DB history + live article + OHLCV) |
+| Model | `src/model/predictor.py` | Load `xgboost_direction_model.joblib` once, predict with probabilities |
+| Storage | `src/realtime/prediction_repository.py` | Insert row into `predictions` table |
+| Orchestration | `src/realtime/realtime_pipeline.py` | `RealtimePipeline.predict(ticker)` |
+
+### Pipeline
+
+```
+Finnhub (latest news)
+        ↓
+FinBERT sentiment
+        ↓
+FeatureEngineer (historical DB articles + live article + stock_prices)
+        ↓
+ModelPredictor (XGBoost artifact)
+        ↓
+PredictionResult + PostgreSQL insert
+```
+
+### Prediction flow
+
+1. **Fetch news** — `FinnhubClient.fetch_latest_news(ticker)` returns the most recent article.
+2. **Sentiment** — FinBERT classifies the headline (+ summary) as positive / neutral / negative.
+3. **Features** — Historical sentiment rows and OHLCV prices are loaded from PostgreSQL; the live article is merged in; `FeatureEngineer.generate_features()` produces one 41-column vector for the article's date.
+4. **Predict** — `ModelPredictor.predict_from_vector()` returns the predicted direction and BUY / HOLD / SELL probabilities.
+5. **Persist** — `PredictionRepository.save_prediction()` writes ticker, headline, prediction, confidence, probabilities, and timestamps to the `predictions` table.
+
+### Command
+
+```bash
+python scripts/predict_live.py --ticker AAPL
+```
+
+Requires `FINNHUB_API_KEY`, `DATABASE_URL`, and a trained model at `artifacts/models/xgboost_direction_model.joblib`. Create the `predictions` table with `python scripts/fetch_prices.py --create-tables` (or `load_to_db.py --create-tables` when input CSVs are available).
+
+### Output
+
+Terminal output includes:
+
+- **Ticker** and **Headline** of the article used
+- **Sentiment** label and FinBERT confidence
+- **Prediction** — BUY, HOLD, or SELL
+- **Confidence** — probability of the predicted class
+- **Probabilities** — BUY, HOLD, and SELL percentages
+
+The same result is returned as a `PredictionResult` dataclass from `RealtimePipeline.predict()` for programmatic use.
+
+---
+
 ## Configuration
 
 All settings are managed via environment variables (or `.env`):
@@ -1132,6 +1235,20 @@ stock_prices
 ├── volume          BIGINT (nullable)
 └── created_at      TIMESTAMPTZ (server default)
 
+predictions
+├── id               BIGINT PK (auto-increment)
+├── ticker           VARCHAR(10)
+├── prediction       VARCHAR(10)          ← BUY / HOLD / SELL
+├── confidence       FLOAT                ← probability of predicted class
+├── buy_probability  FLOAT
+├── hold_probability FLOAT
+├── sell_probability FLOAT
+├── headline         TEXT
+├── published_at     TIMESTAMPTZ (nullable)
+└── created_at       TIMESTAMPTZ (server default)
+
+Stores live inference results from Phase 8 (`predict_live.py`).
+
 Indexes on stock_prices:
   ix_stock_prices_ticker       on ticker
   ix_stock_prices_ticker_date  on (ticker, trading_date)
@@ -1189,7 +1306,6 @@ Set `FINBERT_DEVICE=cpu` to force CPU inference regardless of available hardware
 | ~~**Hyperparameter tuning**~~    | ✅ Done in Phase 7.5 — RandomizedSearchCV with TimeSeriesSplit CV               |
 | ~~**Time-series cross-validation**~~ | ✅ Done in Phase 7.5 — TimeSeriesSplit replaces random split               |
 | **SHAP explainability**          | Per-prediction feature attribution using SHAP values                             |
-| **Real-time inference**          | Live pipeline connecting Finnhub stream → FinBERT → feature engineering → model  |
 | **Streamlit dashboard**          | Interactive UI for signal monitoring, feature exploration, and prediction history |
 | **Docker deployment**            | Containerised pipeline with `docker-compose` for one-command setup               |
 | **Cloud deployment**             | Scheduled execution on AWS / GCP with managed PostgreSQL                         |

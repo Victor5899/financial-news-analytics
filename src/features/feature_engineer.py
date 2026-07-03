@@ -1011,15 +1011,33 @@ class FeatureEngineer:
             tech: dict[str, float | None] = {
                 col: None for col in TECHNICAL_FEATURE_COLUMNS
             }
+            print("=" * 70)
+            print("Target date:", target_date)
+            print("prices_df is None:", prices_df is None)
+
+            if prices_df is not None:
+                print("Price rows:", len(prices_df))
+                print("Price tickers:", sorted(prices_df["ticker"].unique()))
+
             if prices_df is not None and not prices_df.empty:
                 ticker_prices = prices_df[prices_df["ticker"] == ticker].copy()
+                print(f"Ticker: {ticker}")
+                print("Ticker price rows:", len(ticker_prices))
+
                 if not ticker_prices.empty:
+                    print(
+                        ticker_prices[
+                            ["trading_date", "close_price"]
+                        ].head(5)
+                    )
                     ticker_prices = (
                         ticker_prices
                         .sort_values("trading_date")
                         .reset_index(drop=True)
                     )
                     tech.update(_compute_technical_features(ticker_prices, target_date))
+                    print("Technical features:")
+                    print(tech)
             row.update(tech)
 
             rows.append(row)
@@ -1176,6 +1194,27 @@ class FeatureEngineer:
                 features_df = self.generate_features(
                     raw_df, current, prices_df=prices_df
                 )
+                # DEBUG START
+                if current in (
+                    date(2023, 2, 15),
+                    date(2024, 1, 15),
+                    date(2025, 1, 15),
+                    date(2026, 2, 15),
+                ):
+                    print("\n" + "=" * 60)
+                    print(f"DEBUG FEATURES FOR {current}")
+                    print("=" * 60)
+                    print(features_df[[
+                        "date",
+                        "ticker",
+                        "sma_10",
+                        "ema_10",
+                        "rsi_14",
+                        "macd",
+                        "price_chg_1d",
+                    ]])
+                    print("=" * 60)
+                # DEBUG END
                 all_frames.append(features_df)
                 dates_processed += 1
             except FeatureGenerationError:
@@ -1194,6 +1233,48 @@ class FeatureEngineer:
             return pd.DataFrame(columns=FEATURE_COLUMNS)
 
         combined = pd.concat(all_frames, ignore_index=True)
+
+        # DEBUG START
+        print("\n" + "=" * 80)
+        print("DEBUG: Combined DataFrame BEFORE saving")
+        print("=" * 80)
+
+        tech_cols = [
+            "sma_10",
+            "sma_20",
+            "ema_10",
+            "ema_20",
+            "rsi_14",
+            "macd",
+            "macd_signal",
+            "macd_histogram",
+            "bb_upper",
+            "bb_lower",
+            "bb_width",
+            "atr_14",
+            "volatility_20d",
+            "price_chg_1d",
+            "price_chg_5d",
+            "price_chg_10d",
+            "volume_change_pct",
+            "volume_avg_5d",
+            "volume_ratio",
+        ]
+
+        print("\nCombined shape:")
+        print(combined.shape)
+
+        print("\nFirst 5 rows:")
+        print(combined[["date", "ticker"] + tech_cols].head())
+
+        print("\nNaN counts:")
+        print(combined[tech_cols].isna().sum())
+
+        print("\nNon-null counts:")
+        print(combined[tech_cols].count())
+
+        print("=" * 80)
+        # DEBUG END
 
         if output_dir is not None:
             start_tag = start_date.strftime("%Y-%m-%d")
