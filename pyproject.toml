@@ -46,6 +46,11 @@ ignore = ["ANN101", "ANN102", "ANN401"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN"]
 "scripts/**" = ["ANN", "E402"]
+# Phase 9 (Streamlit UI): long markdown/HTML literal strings are more
+# readable unwrapped; UI callbacks aren't part of the typed public API.
+"app/**" = ["ANN", "E501"]
+"pages/**" = ["ANN", "E501"]
+"streamlit_app.py" = ["ANN", "E501"]
 
 # ── mypy ──────────────────────────────────────────────────────
 [tool.mypy]

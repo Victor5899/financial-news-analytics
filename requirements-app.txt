@@ -1,0 +1,19 @@
+# ─────────────────────────────────────────────────────────────
+# financial-news-analytics — Streamlit web application
+#
+# Additional dependencies for the presentation layer (Phase 9).
+# Install alongside the core backend requirements:
+#
+#   pip install -r requirements.txt -r requirements-app.txt
+#
+# These packages are only imported by streamlit_app.py, pages/, and
+# app/ — the ML pipeline (src/) has no dependency on them.
+# ─────────────────────────────────────────────────────────────
+streamlit>=1.38.0
+plotly>=5.22.0
+shap>=0.46.0
+streamlit-option-menu>=0.3.13
+streamlit-extras>=0.4.7
+streamlit-aggrid>=1.0.5
+scikit-learn>=1.3.0
+joblib>=1.3.0

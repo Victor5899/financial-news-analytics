@@ -8,17 +8,18 @@ An end-to-end financial news analytics and stock movement prediction pipeline th
 
 This project builds a complete supervised machine-learning pipeline for predicting short-term stock price movements from financial news and technical analysis.
 
-The pipeline has seven phases (plus an optimization phase):
+The pipeline has seven core phases, a Phase 7.5 optimization step, and a Phase 8 real-time inference engine:
 
 1. **News ingestion** — historical financial news is collected at scale using [GDELT](https://www.gdeltproject.org/) (multi-year archives) and [Finnhub](https://finnhub.io) (real-time feed). Both sources are normalised into the same schema and feed the same downstream pipeline.
 2. **Sentiment analysis** — [FinBERT](https://huggingface.co/ProsusAI/finbert) (`ProsusAI/finbert`) classifies each article as `positive`, `neutral`, or `negative`.
-3. **Storage** — [PostgreSQL](https://www.postgresql.org/) stores articles, sentiment results, and OHLCV stock prices with safe upsert semantics.
+3. **Storage** — [PostgreSQL](https://www.postgresql.org/) stores articles, sentiment results, OHLCV stock prices, and live predictions with safe upsert semantics (append-only for `predictions`).
 4. **Feature engineering** — per-ticker, per-day feature vectors are computed from sentiment aggregates and 19 technical indicators derived from OHLCV prices (SMA, EMA, RSI, MACD, Bollinger Bands, ATR, rolling volatility, price returns, and volume features). The result is a 41-feature ML-ready dataset.
 5. **Stock price ingestion** — [Yahoo Finance](https://finance.yahoo.com/) (`yfinance`) supplies historical OHLCV data that feeds both the technical indicator computation (Phase 4) and the forward-looking label generation (Phase 6).
 6. **ML dataset builder** — feature vectors are joined with future price movements to produce binary and multi-class labels across 1-, 3-, 5-, and 7-trading-day horizons.
 7. **Model training** — an [XGBoost](https://xgboost.readthedocs.io/) multi-class classifier is trained on the labelled dataset to predict BUY / HOLD / SELL signals, with a full evaluation suite and serialised model artifacts.
 8. **Model optimization** *(Phase 7.5)* — TimeSeriesSplit validation replaces the random split, optional `RandomizedSearchCV` finds the best hyperparameters, and the evaluation suite is extended with balanced accuracy, MCC, and per-class metrics.
 9. **Real-Time Prediction Engine** *(Phase 8)* — fetches the latest news from Finnhub, performs FinBERT sentiment analysis, generates the same 41 engineered features used during training, loads the trained XGBoost model, predicts BUY / HOLD / SELL, stores predictions in PostgreSQL, and supports live inference from the command line.
+10. **Streamlit Web Application** *(Phase 9)* — a production-quality, multi-page dashboard (`streamlit_app.py` + `pages/`) that turns the entire pipeline into a demoable analytics product: live predictions, live news, historical analysis, technical indicators, sentiment analytics, SHAP model explainability, and system health — all built as a thin presentation layer over Phases 1-8, with **zero duplicated business logic**.
 
 | Phase     | Status      | Description                                                              |
 | --------- | ----------- | ------------------------------------------------------------------------ |
@@ -31,6 +32,7 @@ The pipeline has seven phases (plus an optimization phase):
 | Phase 7   | ✅ Complete | XGBoost Model Training & Prediction → `artifacts/`                     |
 | Phase 7.5 | ✅ Complete | Model Optimization — TimeSeriesSplit + RandomizedSearchCV + richer metrics |
 | Phase 8   | ✅ Complete | Real-Time Prediction Engine → Live BUY / HOLD / SELL predictions stored in PostgreSQL |
+| Phase 9   | ✅ Complete | Streamlit Web Application → 9-page dashboard with SHAP explainability, `streamlit_app.py` + `pages/` |
 
 ---
 
@@ -52,6 +54,12 @@ The pipeline has seven phases (plus an optimization phase):
 | **XGBoost**      | Gradient-boosted tree classifier                 |
 | **Matplotlib**   | Feature importance bar-chart visualisation       |
 | **Joblib**       | Model artifact serialisation                     |
+| **Streamlit**    | Multi-page web dashboard (presentation layer)    |
+| **Plotly**       | Interactive charts (candlesticks, indicators, SHAP bars) |
+| **SHAP**         | Model explainability — per-prediction & global feature attribution |
+| **streamlit-option-menu** | Sidebar ticker/navigation widget                |
+| **streamlit-extras**      | Additional Streamlit UI helpers                 |
+| **streamlit-aggrid**      | Sortable/filterable data grids                  |
 
 ---
 
@@ -59,7 +67,7 @@ The pipeline has seven phases (plus an optimization phase):
 
 - Multi-year historical news backfill via GDELT; real-time ingestion via Finnhub
 - FinBERT sentiment analysis (`positive` / `neutral` / `negative`)
-- PostgreSQL storage with safe upsert semantics across all three tables
+- PostgreSQL storage with safe upsert semantics across article, sentiment, and price tables; append-only live prediction storage
 - 41 engineered ML features per ticker per day:
   - Sentiment aggregates, source diversity, and time-window article counts
   - Rolling sentiment means (3-day and 7-day)
@@ -86,13 +94,17 @@ The pipeline has seven phases (plus an optimization phase):
 - Prediction persistence in PostgreSQL
 - Shared feature engineering pipeline between training and live inference
 - Reuses the same 41 engineered features for production inference
-- 940+ unit tests — no model download and no PostgreSQL instance required
+- 1001 unit and integration tests — no model download and no PostgreSQL instance required
+- **Production-quality Streamlit dashboard** (Phase 9) — 9 pages covering live prediction, live news, historical analysis, technical indicators, sentiment analytics, SHAP explainability, system health, and settings
+- Presentation layer only imports and calls Phase 1-8 modules — no reimplementation of prediction, database, feature-engineering, FinBERT, or Finnhub logic
+- SHAP `TreeExplainer` over the existing trained XGBoost model — global feature importance, per-class SHAP bar charts, waterfall plots, and plain-English prediction explanations
+- Cached data/resource layers (`st.cache_data` / `st.cache_resource`) so the FinBERT model, XGBoost model, and database connections are loaded once per session
 
 ---
 
 ## Current Dataset Statistics
 
-The following statistics reflect the historical dataset generated from Jan 2025 to Jun 2026.
+The following statistics reflect the historical dataset generated from Jan 2025 to Jun 2026. **TODO:** Recompute from your local `data/` exports and PostgreSQL instance to refresh these counts after a new backfill.
 
 | Metric                   | Value             |
 | ------------------------ | ----------------- |
@@ -139,6 +151,8 @@ The project evolved from a **sentiment-only baseline** into a **hybrid sentiment
 | Sentiment-only               | 22 sentiment and rolling features       | Random split        | ~29%        |
 | Sentiment + Technical        | 41 features (sentiment + 19 indicators) | Random split        | **51.58%**  |
 | Phase 7.5 Optimized Model    | 41 features (sentiment + 19 indicators) | TimeSeriesSplit     | **41.03%**  |
+
+*Baseline rows reflect earlier experiment runs on the same ticker universe. **TODO:** Re-run training/evaluation to refresh if the underlying dataset changes.*
 
 Adding technical indicators increased accuracy by approximately **+22 percentage points** over the sentiment-only baseline. The Phase 7.5 figure (41.03%) is lower than the 51.58% reported under a random split, but this reflects a **stricter and more realistic evaluation** — not a worse model. TimeSeriesSplit prevents any future data from leaking into the training set, producing a performance estimate that better represents how the model would behave on genuinely unseen future data.
 
@@ -195,21 +209,27 @@ financial-news-analytics/
 │
 ├── tests/
 │   ├── conftest.py                # Shared fixtures (settings mock)
+│   ├── integration/
+│   │   ├── test_backfill_pipeline.py      # Phase 4 + 6 backfill integration tests
+│   │   └── test_gdelt_pipeline.py         # GDELT → Phase 2 schema compatibility
 │   └── unit/
 │       ├── test_news_client.py
 │       ├── test_gdelt_client.py           # GDELT client unit tests
 │       ├── test_sentiment_analyzer.py
 │       ├── test_run_sentiment.py          # Phase 2 script tests
 │       ├── test_repository.py             # Phase 3: SQLite in-memory tests
-│       ├── test_feature_engineer.py       # Phase 4: 95 tests (sentiment/rolling)
-│       ├── test_technical_indicators.py   # Phase 4: 108 tests (technical indicators)
-│       ├── test_price_client.py           # Phase 5: 62 tests (yfinance mocked)
-│       ├── test_price_repository.py       # Phase 5: 60 tests (SQLite in-memory)
-│       ├── test_dataset_builder.py        # Phase 6: 113 tests (SQLite in-memory)
+│       ├── test_feature_engineer.py       # Phase 4: sentiment/rolling tests
+│       ├── test_technical_indicators.py   # Phase 4: technical indicator tests
+│       ├── test_price_client.py           # Phase 5: yfinance mocked
+│       ├── test_price_repository.py       # Phase 5: SQLite in-memory
+│       ├── test_dataset_builder.py        # Phase 6: SQLite in-memory
 │       ├── test_metrics.py                # Phase 7: metrics unit tests
 │       ├── test_model_io.py               # Phase 7: model save/load tests
 │       ├── test_predictor.py              # Phase 7: inference tests
-│       └── test_trainer.py                # Phase 7: training pipeline tests
+│       ├── test_trainer.py                # Phase 7: training pipeline tests
+│       ├── test_finnhub_client.py         # Phase 8: live Finnhub client tests
+│       ├── test_prediction_repository.py  # Phase 8: predictions table tests
+│       └── test_realtime_pipeline.py      # Phase 8: live inference pipeline tests
 │
 ├── artifacts/
 │   ├── models/
@@ -218,19 +238,50 @@ financial-news-analytics/
 │   │   └── xgboost_metrics.json           # Evaluation metrics
 │   └── plots/
 │       ├── feature_importance.png          # Top-20 feature bar chart
-│       └── feature_importance.csv          # All features ranked by importance
+│       ├── feature_importance.csv          # All features ranked by importance
+│       └── top20_feature_importance.csv    # Top-20 features with rank column
 │
 ├── data/
 │   ├── raw/                   # Phase 1 output: Finnhub + GDELT CSVs (gitignored)
 │   │   └── gdelt/             # GDELT backfill output (gitignored)
 │   ├── processed/             # Phase 2 output (gitignored)
 │   ├── features/              # Phase 4 output (gitignored)
-│   └── ml/                    # Phase 6 output (gitignored)
+│   └── ml/                    # Phase 6 output (gitignored) — also used as the SHAP background sample
 │
-├── .env.example               # Environment variable template
-├── requirements.txt           # Runtime dependencies
-├── requirements-dev.txt       # Dev/test dependencies
-└── pyproject.toml             # Project metadata + tool config
+├── app/                        # Phase 9: Streamlit presentation layer (no business logic)
+│   ├── bootstrap.py             # Shared per-page setup: page config, styles, sidebar
+│   ├── components/
+│   │   ├── styles.py             # Color palette, global CSS, badges, section headers
+│   │   ├── sidebar.py             # Ticker selector, status badges, global settings
+│   │   ├── metric_cards.py        # KPI card grid
+│   │   ├── prediction_card.py     # Renders a PredictionResult (headline/sentiment/probabilities)
+│   │   ├── charts.py              # Plotly figure builders (candlesticks, MACD, RSI, SHAP bars, …)
+│   │   └── tables.py              # Sortable/filterable tables (AgGrid) + CSV download
+│   └── services/                 # Thin, cached wrappers around src/ — reused, never duplicated
+│       ├── database_service.py    # Read-only queries via DatabaseManager + ORM models
+│       ├── prediction_service.py  # RealtimePipeline, ModelPredictor, FinnhubClient wrappers
+│       └── analytics_service.py   # Technical-indicator series, sentiment aggregation, SHAP
+│
+├── pages/                       # Phase 9: multi-page Streamlit app (auto-registered sidebar nav)
+│   ├── 1_Dashboard.py
+│   ├── 2_Live_Prediction.py
+│   ├── 3_Live_News.py
+│   ├── 4_Historical_Predictions.py
+│   ├── 5_Technical_Analysis.py
+│   ├── 6_Sentiment_Analytics.py
+│   ├── 7_Model_Explainability.py
+│   ├── 8_System_Analytics.py
+│   └── 9_Settings.py
+│
+├── .streamlit/
+│   └── config.toml             # Streamlit theme (primary color, font)
+│
+├── streamlit_app.py             # Phase 9 entry point — `streamlit run streamlit_app.py`
+├── .env.example                # Environment variable template
+├── requirements.txt            # Runtime dependencies (Phases 1-8)
+├── requirements-app.txt        # Streamlit / Plotly / SHAP dependencies (Phase 9)
+├── requirements-dev.txt        # Dev/test dependencies
+└── pyproject.toml              # Project metadata + tool config
 ```
 
 ---
@@ -344,7 +395,7 @@ Options:
 | `--input-file PATH`             | —                  | Load a single CSV; ticker inferred from `<TICKER>_sentiment_*.csv` |
 | `--input-dir PATH`              | —                  | Scan a directory for all sentiment CSVs (alphabetical order)       |
 | `--model-name ProsusAI/finbert` | from `.env`        | Model name stored in DB                                            |
-| `--create-tables`               | —                  | Run `CREATE TABLE IF NOT EXISTS` before loading                    |
+| `--create-tables`               | —                  | Run `CREATE TABLE IF NOT EXISTS` for all ORM tables (incl. `predictions`) before loading |
 | `--log-level INFO`              | from `.env`        | Verbosity                                                          |
 | `--dry-run`                     | —                  | Print config and exit                                              |
 
@@ -399,7 +450,7 @@ Options:
 | `--start-date 2025-01-01`   | today − lookback | Inclusive start date                             |
 | `--end-date 2026-01-01`     | today            | End date (exclusive per yfinance convention)     |
 | `--lookback-days 365`       | `365`            | Days of history when `--start-date` is omitted  |
-| `--create-tables`           | —                | Run `CREATE TABLE IF NOT EXISTS` before fetching |
+| `--create-tables`           | —                | Run `CREATE TABLE IF NOT EXISTS` for all ORM tables (incl. `predictions`) before fetching |
 | `--dry-run`                 | —                | Fetch data but skip all DB writes                |
 | `--log-level INFO`          | from `.env`      | Verbosity                                        |
 
@@ -442,17 +493,20 @@ python scripts/train_model.py --dry-run
 
 Output: model artifact, metrics JSON, and feature importance chart in `artifacts/`.
 
-### 11. Run Phase 8 — Real-Time Prediction
+### 10. Run Phase 8 — Real-Time Prediction
 
 ```bash
 python scripts/predict_live.py --ticker AAPL
 
 python scripts/predict_live.py --ticker TSLA
+
+# Skip PostgreSQL write (inference only)
+python scripts/predict_live.py --ticker AAPL --no-save
 ```
 
 The script fetches the newest company news for the ticker, runs FinBERT sentiment analysis, generates live features using the same `FeatureEngineer` pipeline as training, loads the trained XGBoost model from `artifacts/models/xgboost_direction_model.joblib`, predicts BUY / HOLD / SELL with per-class probabilities, and stores the result in the PostgreSQL `predictions` table.
 
-### 12. Run predictions
+### 11. Run predictions
 
 ```bash
 # Predict on a dataset CSV
@@ -465,6 +519,16 @@ python scripts/predict.py \
     --input  data/ml/ml_dataset_2026-06-16.csv \
     --output data/ml/ml_dataset_2026-06-16_predictions.csv
 ```
+
+### 12. Run Phase 9 — Launch the Streamlit dashboard
+
+```bash
+pip install -r requirements-app.txt
+
+streamlit run streamlit_app.py
+```
+
+Open [http://localhost:8501](http://localhost:8501). Requires the same `.env` (`DATABASE_URL`, `FINNHUB_API_KEY`) and a trained model artifact at `artifacts/models/xgboost_direction_model.joblib`. See [Phase 9 — Streamlit Web Application](#phase-9--streamlit-web-application) below for the full page-by-page tour.
 
 ---
 
@@ -768,7 +832,7 @@ data/ml/
 
 For each `(ticker, date)` row in the feature dataset:
 
-1. **Locate today's close** — look up `close_price` for `date` in `stock_prices`.
+1. **Locate today's close** — if the feature `date` is a weekend or market holiday, align it to the next available trading day; then look up `close_price` in `stock_prices`.
 2. **Find future closes** — using a trading-day index (not calendar days), find the closing price N trading days ahead for N ∈ {1, 3, 5, 7}.
 3. **Compute returns** — `return_Nd = (future_close - close_today) / close_today`
 4. **Assign binary labels** — `1` if return > 0, `0` otherwise.
@@ -813,8 +877,9 @@ The output CSV contains **all 41 Phase 4 feature columns** (plus `ticker` and `d
 | Scenario                             | Behaviour                           |
 | ------------------------------------ | ----------------------------------- |
 | Ticker not in `stock_prices`         | Row skipped, warning logged         |
-| Feature date not in `stock_prices`   | Row skipped, warning logged         |
-| Insufficient future trading days     | Row skipped, warning logged         |
+| Feature date is a weekend/holiday    | Aligned to the next available trading day via `_find_next_trading_date` |
+| No trading day on or after feature date | Row skipped, warning logged     |
+| Insufficient future trading days     | Partial labels (`NULL` for missing horizons); row retained          |
 | All required future closes missing   | `LabelGenerationError` raised       |
 | `NULL` close price in database       | Treated as missing, row skipped     |
 
@@ -942,26 +1007,28 @@ print(result["probabilities"])         # {"BUY": 0.58, "HOLD": 0.27, "SELL": 0.1
 
 ```json
 {
-  "accuracy": 0.5185,
-  "balanced_accuracy": 0.5120,
-  "mcc": 0.2741,
+  "accuracy": 0.4103,
+  "balanced_accuracy": 0.3954,
+  "mcc": 0.1084,
   "precision": {
-    "macro": 0.5231,
-    "per_class": { "BUY": 0.54, "HOLD": 0.52, "SELL": 0.51 }
+    "macro": 0.4190,
+    "per_class": { "BUY": 0.42, "HOLD": 0.41, "SELL": 0.43 }
   },
   "recall": {
-    "macro": 0.5120,
-    "per_class": { "BUY": 0.52, "HOLD": 0.54, "SELL": 0.49 }
+    "macro": 0.3954,
+    "per_class": { "BUY": 0.40, "HOLD": 0.39, "SELL": 0.40 }
   },
   "f1": {
-    "macro": 0.5163,
-    "per_class": { "BUY": 0.53, "HOLD": 0.53, "SELL": 0.50 }
+    "macro": 0.3987,
+    "per_class": { "BUY": 0.41, "HOLD": 0.39, "SELL": 0.40 }
   },
   "confusion_matrix": [[...], [...], [...]],
   "labels": ["BUY", "HOLD", "SELL"],
   "classification_report": "..."
 }
 ```
+
+*Example reflects the Phase 7.5 TimeSeriesSplit evaluation on the Jan 2025 – Jun 2026 dataset documented above. **TODO:** Replace with values from your `artifacts/metrics/xgboost_metrics.json` after retraining.*
 
 ---
 
@@ -1144,7 +1211,13 @@ PredictionResult + PostgreSQL insert
 python scripts/predict_live.py --ticker AAPL
 ```
 
-Requires `FINNHUB_API_KEY`, `DATABASE_URL`, and a trained model at `artifacts/models/xgboost_direction_model.joblib`. Create the `predictions` table with `python scripts/fetch_prices.py --create-tables` (or `load_to_db.py --create-tables` when input CSVs are available).
+Requires `FINNHUB_API_KEY`, `DATABASE_URL`, and a trained model at `artifacts/models/xgboost_direction_model.joblib`. Create the `predictions` table (and any missing tables) with:
+
+```bash
+python scripts/fetch_prices.py --create-tables
+```
+
+This runs `DatabaseManager.create_tables()` (`CREATE TABLE IF NOT EXISTS`) for all ORM models, including `predictions`.
 
 ### Output
 
@@ -1157,6 +1230,100 @@ Terminal output includes:
 - **Probabilities** — BUY, HOLD, and SELL percentages
 
 The same result is returned as a `PredictionResult` dataclass from `RealtimePipeline.predict()` for programmatic use.
+
+---
+
+## Phase 9 — Streamlit Web Application
+
+Phase 9 turns the terminal-based pipeline (Phases 1-8) into a **production-quality, multi-page Streamlit dashboard** — the kind of demoable analytics product you'd show in a portfolio review or internship interview.
+
+**This is explicitly a presentation layer, not a rewrite.** Every page imports and calls existing `src/` modules (`RealtimePipeline`, `FinnhubClient`, `FinBERTSentimentAnalyzer`, `FeatureEngineer`, `ModelPredictor`, `DatabaseManager`, the SQLAlchemy ORM models and repositories). No prediction logic, database schema, feature-engineering math, or FinBERT/Finnhub code is duplicated — the `app/services/*` modules are thin, cached wrappers around what already exists.
+
+### Architecture
+
+```
+streamlit_app.py  (landing page: KPIs + navigation cards)
+        │
+        ├── app/bootstrap.py          shared page setup (layout, CSS, sidebar)
+        │
+        ├── app/components/           presentation only — no business logic
+        │     styles.py                 palette, CSS, badges, section headers
+        │     sidebar.py                ticker selector, status badges, settings
+        │     metric_cards.py           KPI card grid
+        │     prediction_card.py        renders a PredictionResult
+        │     charts.py                 Plotly figure builders
+        │     tables.py                 AgGrid / sortable tables + CSV export
+        │
+        ├── app/services/             thin wrappers around src/ (Phases 1-8)
+        │     database_service.py       reads via DatabaseManager + ORM models
+        │     prediction_service.py     RealtimePipeline, ModelPredictor, FinnhubClient
+        │     analytics_service.py      technical-indicator series, sentiment
+        │                               aggregation, SHAP (TreeExplainer)
+        │
+        └── pages/                    9 pages, auto-registered in the sidebar nav
+              1_Dashboard.py             → database_service, prediction_service
+              2_Live_Prediction.py       → RealtimePipeline.predict()
+              3_Live_News.py             → FinnhubClient + FinBERTSentimentAnalyzer
+              4_Historical_Predictions.py→ database_service (filtered SQL reads)
+              5_Technical_Analysis.py    → feature_engineer's private indicator math
+              6_Sentiment_Analytics.py   → aggregates stored FinBERT results
+              7_Model_Explainability.py  → SHAP over the trained XGBoost artifact
+              8_System_Analytics.py      → DB counts + artifacts/metrics/*.json
+              9_Settings.py              → session-wide preferences + exports
+```
+
+Notably, **Page 5 (Technical Analysis)** imports the exact private helper functions Phase 4 uses internally (`_sma`, `_ema`, `_rsi`, `_macd_lines`, `_bollinger_bands`, `_atr` from `src.features.feature_engineer`) to plot full indicator time series — so chart values are guaranteed identical to what the model was trained on, with zero re-derivation.
+
+### Pages
+
+| # | Page | What it does |
+| - | ---- | ------------ |
+| 1 | **Dashboard** | Total articles/predictions/tickers, model accuracy, latest prediction/headline/sentiment, recent headlines & predictions, ticker/prediction/confidence distributions, activity timeline |
+| 2 | **Live Prediction** | Pick a ticker → `RealtimePipeline.predict()` → headline, sentiment, prediction, probability chart, technical indicators, generated features, save-to-DB with a success toast |
+| 3 | **Live News** | Live Finnhub headlines per ticker, scored on-the-fly with the same `FinBERTSentimentAnalyzer`, rendered as news cards with a refresh button |
+| 4 | **Historical Predictions** | Filter PostgreSQL `predictions` by date/ticker/direction/confidence/search, sortable AgGrid table, CSV export, confidence & volume line charts |
+| 5 | **Technical Analysis** | Candlesticks + SMA/EMA overlays, MACD, RSI, Bollinger Bands, ATR, Volume — all Plotly, all reusing Phase 4's indicator math |
+| 6 | **Sentiment Analytics** | Daily sentiment trend + 7-day rolling average, positive/neutral/negative share, sentiment timeline, ticker-wise breakdown |
+| 7 | **Model Explainability** | SHAP `TreeExplainer` over the trained XGBoost model — global feature importance, per-class SHAP bar charts, waterfall plots, and a plain-English explanation of *why* the model predicted BUY/HOLD/SELL |
+| 8 | **System Analytics** | Database row counts, training/balanced accuracy, macro F1/precision/recall, confusion matrix, prediction/confidence distributions |
+| 9 | **Settings** | Ticker watchlist, chart theme, auto-refresh, prediction-saving toggle, CSV/JSON exports, live database/model/API status |
+
+### Design & engineering notes
+
+- **Reuse, never duplicate** — `app/services/` never re-implements a prediction, a SQL upsert, a sentiment score, or a technical indicator; it only imports from `src/`.
+- **Caching** — `st.cache_resource` for expensive singletons (the loaded XGBoost model, the FinBERT pipeline, the SQLAlchemy engine, the SHAP explainer); `st.cache_data(ttl=60)` for dashboard reads so pages stay fast without hammering PostgreSQL.
+- **Explainability without leaking secrets** — SHAP instance-level explanations run on the feature vector already returned by `PredictionResult.feature_values`, so no additional model or database changes were needed. Global SHAP summaries opportunistically sample `data/ml/*.csv` when present, and gracefully fall back to the model's built-in feature importances when that local dataset isn't available (e.g. a fresh clone without `data/`).
+- **Graceful degradation** — every page checks database/model/API availability up front and renders a clear error or empty-state instead of a stack trace.
+- **Independent dependency set** — Streamlit/Plotly/SHAP/AgGrid live in `requirements-app.txt`, kept separate from the core pipeline's `requirements.txt` so `src/` has zero new runtime dependencies.
+
+### Running the dashboard
+
+```bash
+pip install -r requirements.txt -r requirements-app.txt
+streamlit run streamlit_app.py
+```
+
+Then open [http://localhost:8501](http://localhost:8501). The sidebar shows live Database / Model / API status badges — if any are red, check `.env` (`DATABASE_URL`, `FINNHUB_API_KEY`) and confirm `artifacts/models/xgboost_direction_model.joblib` exists (see [Phase 7](#phase-7--xgboost-model-training--prediction)).
+
+### Screenshots
+
+> Screenshots aren't checked into the repo yet — run the app locally (`streamlit run streamlit_app.py`), capture each page, and drop the images into `docs/screenshots/` using the filenames below. GitHub will render them automatically once added.
+
+| Page | Screenshot |
+| ---- | ---------- |
+| Dashboard | `docs/screenshots/01_dashboard.png` |
+| Live Prediction | `docs/screenshots/02_live_prediction.png` |
+| Live News | `docs/screenshots/03_live_news.png` |
+| Historical Predictions | `docs/screenshots/04_historical_predictions.png` |
+| Technical Analysis | `docs/screenshots/05_technical_analysis.png` |
+| Sentiment Analytics | `docs/screenshots/06_sentiment_analytics.png` |
+| Model Explainability (SHAP) | `docs/screenshots/07_model_explainability.png` |
+| System Analytics | `docs/screenshots/08_system_analytics.png` |
+| Settings | `docs/screenshots/09_settings.png` |
+
+```markdown
+![Dashboard](docs/screenshots/01_dashboard.png)
+```
 
 ---
 
@@ -1192,7 +1359,10 @@ docker run -d \
 # Add to .env
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/financial_news
 
-# Create tables + load first batch
+# Create all tables (safe on existing DB — uses IF NOT EXISTS)
+python scripts/fetch_prices.py --create-tables
+
+# Then load first batch of articles (requires processed CSVs for the date)
 python scripts/load_to_db.py --create-tables
 ```
 
@@ -1252,9 +1422,13 @@ Stores live inference results from Phase 8 (`predict_live.py`).
 Indexes on stock_prices:
   ix_stock_prices_ticker       on ticker
   ix_stock_prices_ticker_date  on (ticker, trading_date)
+
+Indexes on predictions:
+  ix_predictions_ticker         on ticker
+  ix_predictions_ticker_created on (ticker, created_at)
 ```
 
-Re-running any load script is always safe — all tables use `ON CONFLICT DO UPDATE` (PostgreSQL) or SELECT-then-UPDATE (SQLite/tests), so existing rows are refreshed rather than duplicated.
+Re-running article and price load scripts is always safe — those tables use `ON CONFLICT DO UPDATE` (PostgreSQL) or SELECT-then-UPDATE (SQLite/tests), so existing rows are refreshed rather than duplicated. Phase 8 live predictions are **append-only inserts** into `predictions`.
 
 ---
 
@@ -1268,7 +1442,7 @@ pytest tests/unit/test_technical_indicators.py   # technical indicator tests onl
 pytest --cov=src --cov-report=term-missing       # with coverage
 ```
 
-All unit tests mock the Hugging Face pipeline and use an in-memory SQLite database — no model download and no PostgreSQL instance are needed.
+All unit and integration tests mock the Hugging Face pipeline and use an in-memory SQLite database — no model download and no PostgreSQL instance are needed. The suite currently collects **1001 tests** (`pytest --collect-only`).
 
 ---
 
@@ -1305,8 +1479,8 @@ Set `FINBERT_DEVICE=cpu` to force CPU inference regardless of available hardware
 | -------------------------------- | -------------------------------------------------------------------------------- |
 | ~~**Hyperparameter tuning**~~    | ✅ Done in Phase 7.5 — RandomizedSearchCV with TimeSeriesSplit CV               |
 | ~~**Time-series cross-validation**~~ | ✅ Done in Phase 7.5 — TimeSeriesSplit replaces random split               |
-| **SHAP explainability**          | Per-prediction feature attribution using SHAP values                             |
-| **Streamlit dashboard**          | Interactive UI for signal monitoring, feature exploration, and prediction history |
+| ~~**SHAP explainability**~~      | ✅ Done in Phase 9 — global + per-prediction SHAP (waterfall, bar charts, plain-English explanations) |
+| ~~**Streamlit dashboard**~~      | ✅ Done in Phase 9 — 9-page dashboard for signal monitoring, feature exploration, and prediction history |
 | **Docker deployment**            | Containerised pipeline with `docker-compose` for one-command setup               |
 | **Cloud deployment**             | Scheduled execution on AWS / GCP with managed PostgreSQL                         |
 | **Additional data sources**      | Earnings call transcripts, SEC filings, options flow, macroeconomic indicators   |

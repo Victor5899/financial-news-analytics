@@ -1,0 +1,9 @@
+[theme]
+primaryColor = "#2563eb"
+font = "sans serif"
+
+[client]
+showSidebarNavigation = true
+
+[server]
+runOnSave = true
