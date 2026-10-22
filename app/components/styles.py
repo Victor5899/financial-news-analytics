@@ -29,9 +29,11 @@ _CSS = """
     --fnx-radius: 12px;
 }
 
-/* Tighter, more "product" feeling spacing */
+/* Tighter, more "product" feeling spacing.
+   Streamlit's header is position: fixed and 3.75rem tall, so padding-top
+   must exceed that or the first element on every page renders beneath it. */
 .block-container {
-    padding-top: 2rem;
+    padding-top: 5rem;
     padding-bottom: 3rem;
 }
 
